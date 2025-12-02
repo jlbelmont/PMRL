@@ -104,18 +104,26 @@ def make_env(headless: bool = True):
     env_cfg["headless"] = headless
     env_cfg["save_video"] = False
     root = Path(__file__).resolve().parents[1]
-    rom_path = root / "pokemonred_puffer" / "red.gb"
+    assets_root = root / "archive" / "pokemonred_puffer_assets"
+    rom_path = assets_root / "red.gb"
+    state_dir = assets_root / "pyboy_states"
     if not rom_path.exists():
         print("[warn] red.gb not found; skipping env creation")
         return None
-    env_cfg["gb_path"] = str(rom_path)
-
-    state_dir = root / "pokemonred_puffer" / "pyboy_states"
-    init_state = state_dir / f"{env_cfg.get('init_state', 'Bulbasaur')}.state"
-    if not init_state.exists():
-        print("[warn] init state not found; skipping env creation")
+    if not state_dir.exists():
+        print("[warn] savestates not found; skipping env creation")
         return None
+    env_cfg["gb_path"] = str(rom_path)
     env_cfg["state_dir"] = str(state_dir)
+    # choose first available state if configured one missing
+    init_name = env_cfg.get("init_state", "Bulbasaur")
+    init_state = state_dir / f"{init_name}.state"
+    if not init_state.exists():
+        candidates = sorted(state_dir.glob("*.state"))
+        if not candidates:
+            print("[warn] no savestates found; skipping env creation")
+            return None
+        env_cfg["init_state"] = candidates[0].stem
 
     cfg = OmegaConf.create(env_cfg)
     env = RedGymEnv(cfg)

@@ -9,14 +9,12 @@ from collections import deque
 from pathlib import Path
 from typing import Deque, Dict, List
 
-import gymnasium as gym
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from pokemonred_puffer.environment import RedGymEnv
-
 from .agent import AgentConfig, SlimHierarchicalDQN
+from .env_utils import SafeRedEnv, SimpleVectorEnv
 from .flags import FlagEncoder
 from .video_utils import maybe_save_video
 
@@ -42,12 +40,27 @@ def load_env_config(headless: bool) -> Dict:
     env_cfg = OmegaConf.to_container(config.env, resolve=True)
     env_cfg["headless"] = headless
     env_cfg["save_video"] = False
+    assets_root = repo_root / "archive" / "pokemonred_puffer_assets"
+    rom_path = assets_root / "red.gb"
+    state_dir = assets_root / "pyboy_states"
+    if not rom_path.exists():
+        rom_path = repo_root / "pokemonred_puffer" / "red.gb"
+    if not state_dir.exists():
+        state_dir = repo_root / "pokemonred_puffer" / "pyboy_states"
+    env_cfg["gb_path"] = str(rom_path)
+    env_cfg["state_dir"] = str(state_dir)
+    init_state = env_cfg.get("init_state", "Bulbasaur")
+    init_state_file = Path(env_cfg["state_dir"]) / f"{init_state}.state"
+    if not init_state_file.exists():
+        candidates = sorted(Path(env_cfg["state_dir"]).glob("*.state"))
+        if candidates:
+            env_cfg["init_state"] = candidates[0].stem
     return env_cfg
 
 
-def make_env(env_cfg: Dict, seed: int) -> RedGymEnv:
+def make_env(env_cfg: Dict, seed: int) -> SafeRedEnv:
     cfg = OmegaConf.create(env_cfg)
-    env = RedGymEnv(cfg)
+    env = SafeRedEnv(cfg)
     env.reset(seed=seed)
     return env
 
@@ -74,7 +87,7 @@ def main() -> None:
     def env_fn(idx: int):
         return make_env(env_cfg, seed=args.seed + idx)
 
-    envs = gym.vector.SyncVectorEnv([lambda idx=i: env_fn(idx) for i in range(args.num_envs)])
+    envs = SimpleVectorEnv([lambda idx=i: env_fn(idx) for i in range(args.num_envs)])
     obs, _ = envs.reset(seed=args.seed)
     num_actions = envs.single_action_space.n
 

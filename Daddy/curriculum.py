@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict, deque
-from typing import Deque, Dict, List, Optional
+from pathlib import Path
+from typing import Deque, Dict, Iterable, List, Optional
 
 
 class CurriculumManager:
@@ -16,31 +17,31 @@ class CurriculumManager:
 
     def __init__(
         self,
-        savestates: Optional[List[str]] = None,
+        savestates: Optional[Iterable[Path]] = None,
         window: int = 50,
         promotion_threshold: float = 0.8,
         demotion_threshold: float = 0.2,
     ) -> None:
-        self.savestates = savestates or []
+        self.savestates: List[Path] = list(savestates or [])
         self.history: Dict[str, Deque[bool]] = defaultdict(lambda: deque(maxlen=window))
         self.promotion_threshold = promotion_threshold
         self.demotion_threshold = demotion_threshold
 
-    def record(self, state_name: str, success: bool) -> None:
-        self.history[state_name].append(success)
+    def record(self, state_path: Path, success: bool) -> None:
+        self.history[state_path.name].append(success)
 
-    def success_rate(self, state_name: str) -> float:
-        hist = self.history[state_name]
+    def success_rate(self, state_path: Path) -> float:
+        hist = self.history[state_path.name]
         if not hist:
             return 0.5
         return sum(hist) / len(hist)
 
-    def sample_state(self) -> Optional[str]:
+    def sample_state(self) -> Optional[Path]:
         if not self.savestates:
             return None
         weights = []
-        for name in self.savestates:
-            rate = self.success_rate(name)
+        for path in self.savestates:
+            rate = self.success_rate(path)
             # favor states with mid success rate to encourage progression
             weights.append(max(0.05, 1.0 - abs(rate - 0.5)))
         total = sum(weights)
@@ -52,9 +53,13 @@ class CurriculumManager:
         Simple curriculum shaping: remove mastered states and keep challenging ones.
         """
         remaining = []
-        for name in self.savestates:
-            rate = self.success_rate(name)
+        for path in self.savestates:
+            rate = self.success_rate(path)
             if rate > self.promotion_threshold:
                 continue
-            remaining.append(name)
+            remaining.append(path)
         self.savestates = remaining or self.savestates
+
+    def add_state(self, path: Path) -> None:
+        if path not in self.savestates:
+            self.savestates.append(path)

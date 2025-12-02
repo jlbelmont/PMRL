@@ -656,13 +656,13 @@ class RedGymEnv(Env):
             self.screen_obs()
             | {
                 "direction": np.array(
-                    self.read_m("wSpritePlayerStateData1FacingDirection") // 4, dtype=np.uint8
+                    [self.read_m("wSpritePlayerStateData1FacingDirection") // 4], dtype=np.uint8
                 ),
-                "blackout_map_id": np.array(self.read_m("wLastBlackoutMap"), dtype=np.uint8),
-                "battle_type": np.array(self.read_m("wIsInBattle") + 1, dtype=np.uint8),
+                "blackout_map_id": np.array([self.read_m("wLastBlackoutMap")], dtype=np.uint8),
+                "battle_type": np.array([self.read_m("wIsInBattle") + 1], dtype=np.uint8),
                 # "x": np.array(player_x, dtype=np.uint8),
                 # "y": np.array(player_y, dtype=np.uint8),
-                "map_id": np.array(self.read_m(0xD35E), dtype=np.uint8),
+                "map_id": np.array([self.read_m(0xD35E)], dtype=np.uint8),
                 "bag_items": bag[::2].copy(),
                 "bag_quantity": bag[1::2].copy(),
                 "species": np.array([self.party[i].Species for i in range(6)], dtype=np.uint8),
@@ -679,21 +679,21 @@ class RedGymEnv(Env):
                 "moves": np.array([self.party[i].Moves for i in range(6)], dtype=np.uint8),
                 "events": np.array(self.events.asbytes, dtype=np.uint8),
                 "rival_3": np.array(
-                    self.read_m("wSSAnne2FCurScript") == 4, dtype=np.uint8
+                    [self.read_m("wSSAnne2FCurScript") == 4], dtype=np.uint8
                 ),  # rival 3
                 "game_corner_rocket": np.array(
-                    self.missables.get_missable("HS_GAME_CORNER_ROCKET"), np.uint8
+                    [self.missables.get_missable("HS_GAME_CORNER_ROCKET")], np.uint8
                 ),  # game corner rocket
                 "saffron_guard": np.array(
-                    self.flags.get_bit("BIT_GAVE_SAFFRON_GUARDS_DRINK"), np.uint8
+                    [self.flags.get_bit("BIT_GAVE_SAFFRON_GUARDS_DRINK")], np.uint8
                 ),  # saffron guard
-                "lapras": np.array(self.flags.get_bit("BIT_GOT_LAPRAS"), np.uint8),  # got lapras
+                "lapras": np.array([self.flags.get_bit("BIT_GOT_LAPRAS")], np.uint8),  # got lapras
             }
             | (
                 {}
                 if self.skip_safari_zone
                 else {
-                    "safari_steps": np.array(self.read_short("wSafariSteps"), dtype=np.uint32),
+                    "safari_steps": np.array([self.read_short("wSafariSteps")], dtype=np.uint32),
                 }
             )
         )
@@ -1743,9 +1743,25 @@ class RedGymEnv(Env):
         party_length = self.pyboy.memory[self.pyboy.symbol_lookup("wPartyCount")[1]]
         return self.pyboy.memory[addr : addr + party_length]
 
-    @abstractmethod
     def get_game_state_reward(self):
-        raise NotImplementedError()
+        """
+        Simplified reward for slim agent training.
+        Returns a dictionary so callers expecting per-component rewards still work.
+        """
+        # Basic progress signals: badge count and explored tiles sum (if available)
+        badges = self.get_badges() if hasattr(self, "get_badges") else 0
+        explored = float(np.sum(self.explore_map)) if hasattr(self, "explore_map") else 0.0
+        return {
+            "badges": float(badges),
+            "explore": explored,
+        }
+
+    def seed(self, seed: Optional[int] = None):
+        """Minimal seed hook to satisfy gym/pufferlib expectations."""
+        if seed is None:
+            return
+        random.seed(seed)
+        np.random.seed(seed)
 
     def update_max_op_level(self):
         # opp_base_level = 5

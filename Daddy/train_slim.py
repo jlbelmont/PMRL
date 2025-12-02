@@ -12,23 +12,15 @@ from collections import deque
 from pathlib import Path
 from typing import Deque, Dict, List
 
-import gymnasium as gym
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-try:
-    import pufferlib
-    import pufferlib.emulation
-    import pufferlib.vector
-except ImportError:  # pragma: no cover - optional dependency
-    pufferlib = None  # type: ignore[assignment]
-
-from pokemonred_puffer.environment import RedGymEnv
-
+from .env_utils import SafeRedEnv, SimpleVectorEnv
 from .agent import AgentConfig, SlimHierarchicalDQN
 from .flags import FlagEncoder
 from .logging_utils import PerformanceTracker, RewardLogger
+from .curriculum import CurriculumManager
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--novelty-weight", type=float, default=0.05)
     parser.add_argument("--bayes-weight", type=float, default=0.05)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--mode", choices=["train", "eval"], default="train")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint for eval.")
+    parser.add_argument("--save-state-dir", type=str, default="Daddy/savestates", help="Where to save new .state files.")
+    parser.add_argument("--save-state-every", type=int, default=0, help="Save a savestate every N episodes per env (0 to disable).")
+    parser.add_argument("--use-puffer", action="store_true", help="Use pufferlib vectorization (optional).")
     parser.add_argument("--headless", action="store_true", help="Force headless emulator")
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.set_defaults(headless=True)
@@ -68,32 +65,51 @@ def load_env_config(headless: bool) -> Dict:
     env_cfg = OmegaConf.to_container(config.env, resolve=True)
     env_cfg["headless"] = headless
     env_cfg["save_video"] = False
+    # Resolve asset locations (ROM + savestates). Prefer archive consolidation.
+    assets_root = repo_root / "archive" / "pokemonred_puffer_assets"
+    rom_path = assets_root / "red.gb"
+    state_dir = assets_root / "pyboy_states"
+    if not rom_path.exists():
+        # fallback to legacy location
+        rom_path = repo_root / "pokemonred_puffer" / "red.gb"
+    if not state_dir.exists():
+        state_dir = repo_root / "pokemonred_puffer" / "pyboy_states"
+    # Always override so training uses the consolidated assets, not stale defaults.
+    env_cfg["gb_path"] = str(rom_path)
+    env_cfg["state_dir"] = str(state_dir)
+    # Prefer configured init_state if it exists; otherwise fall back to first available,
+    # otherwise SafeRedEnv will create a fresh state on first reset.
+    init_state = env_cfg.get("init_state", "Bulbasaur")
+    init_state_file = state_dir / f"{init_state}.state"
+    if not init_state_file.exists():
+        candidates = sorted(state_dir.glob("*.state"))
+        if candidates:
+            env_cfg["init_state"] = candidates[0].stem
+    if not rom_path.exists():
+        raise FileNotFoundError(f"ROM not found at {rom_path}. Place red.gb there before training.")
     return env_cfg  # plain dict for OmegaConf.create later
 
 
-def make_env(env_cfg: Dict, seed: int, wrap_with_puffer: bool = False):
+def make_env(env_cfg: Dict, seed: int):
     cfg = OmegaConf.create(env_cfg)
-    env = RedGymEnv(cfg)
+    env = SafeRedEnv(cfg)
     env.reset(seed=seed)
-    if wrap_with_puffer and pufferlib is not None:
-        env = pufferlib.emulation.GymnasiumPufferEnv(env=env)  # type: ignore[attr-defined]
     return env
 
 
-def make_puffer_env_creator(env_cfg: Dict) -> callable:
-    def env_creator():
-        cfg = OmegaConf.create(env_cfg)
-        env = RedGymEnv(cfg)
-        return pufferlib.emulation.GymnasiumPufferEnv(env=env)  # type: ignore[attr-defined]
-
-    return env_creator
-
-
 def obs_to_dict(obs) -> Dict[str, np.ndarray]:
+    """
+    Normalize observations to a dict.
+    - Dict stays as-is.
+    - Structured ndarray (with dtype.names) becomes dict of fields.
+    - Plain ndarray is assumed to be the screen tensor -> {"screen": obs}
+    """
     if isinstance(obs, dict):
         return obs
-    if isinstance(obs, np.ndarray) and obs.dtype.names:
-        return {k: obs[k] for k in obs.dtype.names}
+    if isinstance(obs, np.ndarray):
+        if obs.dtype.names:
+            return {k: obs[k] for k in obs.dtype.names}
+        return {"screen": obs}
     raise TypeError(f"Unsupported observation type: {type(obs)}")
 
 
@@ -121,33 +137,21 @@ def main() -> None:
 
     env_cfg = load_env_config(headless=args.headless)
 
-    envs = None
-    driver = "gym"
-    if pufferlib is not None:
-        try:
-            env_creator = make_puffer_env_creator(env_cfg)
-            envs = pufferlib.vector.make(env_creator, num_envs=args.num_envs)  # type: ignore[attr-defined]
-            driver = "pufferlib"
-        except Exception as exc:  # pragma: no cover - fallback path
-            print(f"[train_slim] pufferlib vector make failed ({exc}), falling back to gym SyncVectorEnv")
-            envs = None
+    # curriculum setup
+    state_dir = Path(env_cfg["state_dir"])
+    initial_states = sorted(state_dir.glob("*.state"))
+    save_state_dir = Path(args.save_state_dir)
+    save_state_dir.mkdir(parents=True, exist_ok=True)
+    curriculum = CurriculumManager(savestates=initial_states)
 
-    if envs is None:
-        def env_fn(idx: int):
-            return make_env(env_cfg, seed=args.seed + idx, wrap_with_puffer=False)
+    def env_fn(idx: int):
+        return make_env(env_cfg, seed=args.seed + idx)
 
-        envs = gym.vector.SyncVectorEnv([lambda idx=i: env_fn(idx) for i in range(args.num_envs)])
-        driver = "gym"
+    envs = SimpleVectorEnv([lambda idx=i: env_fn(idx) for i in range(args.num_envs)])
 
     obs, _ = envs.reset(seed=args.seed)
     obs = obs_to_dict(obs)
-    if driver == "pufferlib":
-        try:
-            num_actions = envs.single_action_space.n
-        except AttributeError:
-            num_actions = envs.action_space.n
-    else:
-        num_actions = envs.single_action_space.n
+    num_actions = envs.single_action_space.n
 
     # Frame stacks per environment
     frame_stacks: List[Deque[np.ndarray]] = [deque(maxlen=args.frame_stack) for _ in range(args.num_envs)]
@@ -172,6 +176,10 @@ def main() -> None:
     agent.flag_encoder = flag_encoder
     reward_logger = RewardLogger(log_dir=log_dir)
     perf = PerformanceTracker()
+    if args.mode == "eval" and args.checkpoint:
+        agent.load_state_dict(torch.load(args.checkpoint, map_location=device))
+        agent.epsilon = 0.0
+        agent.epsilon_min = 0.0
 
     states = agent.reset_hidden(args.num_envs)
     dones = np.zeros(args.num_envs, dtype=bool)
@@ -217,12 +225,8 @@ def main() -> None:
         episode_total += total_np
 
         reset_obs_batch = None
-        if np.any(done_flags) and hasattr(envs, "reset_done"):
-            try:
-                reset_obs_batch, _ = envs.reset_done(done_flags)
-                reset_obs_batch = obs_to_dict(reset_obs_batch)
-            except Exception:
-                reset_obs_batch = None
+        # per-env done handling
+        reset_obs_batch = None
 
         full_reset = False
         for env_idx, done in enumerate(done_flags):
@@ -251,26 +255,26 @@ def main() -> None:
                 episode_total[env_idx] = 0.0
                 episode_lengths[env_idx] = 0
                 agent.reset_episode(env_idx)
-                if reset_obs_batch is not None:
-                    for key in next_obs:
-                        next_obs[key][env_idx] = reset_obs_batch[key][env_idx]
-                    frame_stacks[env_idx].clear()
-                    for _ in range(args.frame_stack):
-                        frame_stacks[env_idx].append(reset_obs_batch["screen"][env_idx])
-                    new_states[env_idx] = agent.network.initial_state(batch_size=1, device=device)
-                    dones[env_idx] = False
-                elif driver == "gym":
-                    reset_obs, _ = envs.envs[env_idx].reset(seed=args.seed + env_idx)
-                    reset_obs = obs_to_dict(reset_obs)
-                    for key in next_obs:
-                        next_obs[key][env_idx] = reset_obs[key]
-                    frame_stacks[env_idx].clear()
-                    for _ in range(args.frame_stack):
-                        frame_stacks[env_idx].append(reset_obs["screen"])
-                    new_states[env_idx] = agent.network.initial_state(batch_size=1, device=device)
-                    dones[env_idx] = False
-                else:
-                    full_reset = True
+                # select next init savestate if available
+                maybe_state = curriculum.sample_state()
+                env = envs.envs[env_idx]
+                if maybe_state and maybe_state.exists():
+                    env.init_state_name = maybe_state.stem
+                    env.init_state_path = Path(env.state_dir) / f"{env.init_state_name}.state"
+                # save new savestates if requested
+                if args.save_state_every and (episode_ids[env_idx] % args.save_state_every == 0):
+                    save_path = save_state_dir / f"ep{episode_ids[env_idx]:05d}_env{env_idx}.state"
+                    env.save_state(save_path)
+                    curriculum.add_state(save_path)
+                reset_obs, _ = envs.envs[env_idx].reset(seed=args.seed + env_idx)
+                reset_obs = obs_to_dict(reset_obs)
+                for key in next_obs:
+                    next_obs[key][env_idx] = reset_obs[key]
+                frame_stacks[env_idx].clear()
+                for _ in range(args.frame_stack):
+                    frame_stacks[env_idx].append(reset_obs["screen"])
+                new_states[env_idx] = agent.network.initial_state(batch_size=1, device=device)
+                dones[env_idx] = False
             else:
                 frame_stacks[env_idx].append(next_obs["screen"][env_idx])
 
@@ -289,26 +293,27 @@ def main() -> None:
         next_obs_tensors = to_torch_batch(next_obs, device=device)
         next_structured, _ = agent.flag_encoder(next_obs_tensors)
 
-        agent.add_transition(
-            frame_batch,
-            structured,
-            actions,
-            total_reward,
-            {"env": r_env, "rnd": intrinsic["rnd"], "novel": intrinsic["novel"], "bayes": intrinsic["bayes"]},
-            torch.as_tensor(done_flags, device=device, dtype=torch.float32),
-            next_frame_batch,
-            next_structured,
-            states,
-        )
+        if args.mode == "train":
+            agent.add_transition(
+                frame_batch,
+                structured,
+                actions,
+                total_reward,
+                {"env": r_env, "rnd": intrinsic["rnd"], "novel": intrinsic["novel"], "bayes": intrinsic["bayes"]},
+                torch.as_tensor(done_flags, device=device, dtype=torch.float32),
+                next_frame_batch,
+                next_structured,
+                states,
+            )
+            if step >= args.learning_starts and step % args.train_every == 0:
+                metrics = agent.learn(args.batch_size)
+                if metrics:
+                    loss = metrics.get("loss", 0.0)
+                    rnd_loss = metrics.get("rnd_loss", 0.0)
+                    print(f"step {step}: loss={loss:.4f} rnd_loss={rnd_loss:.4f}")
+
         states = new_states
         obs = next_obs
-
-        if step >= args.learning_starts and step % args.train_every == 0:
-            metrics = agent.learn(args.batch_size)
-            if metrics:
-                loss = metrics.get("loss", 0.0)
-                rnd_loss = metrics.get("rnd_loss", 0.0)
-                print(f"step {step}: loss={loss:.4f} rnd_loss={rnd_loss:.4f}")
 
         for env_idx in range(args.num_envs):
             reward_logger.log_step(
