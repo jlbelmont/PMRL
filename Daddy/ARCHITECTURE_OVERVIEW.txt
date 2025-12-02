@@ -1,0 +1,36 @@
+Slim Agent Overview (Daddy/)
+============================
+
+Environment / Vectorization
+- Base env: pokemonred_puffer.environment.RedGymEnv (canonical puffer baseline, left unmodified).
+- Vector driver: prefers pufferlib.vector.make with GymnasiumPufferEnv wrapper; falls back to gym SyncVectorEnv if pufferlib is unavailable.
+- Observation handling: keeps dict observations (screen + structured WRAM/state fields); manual frame stacking to (B, T_stack, H, W).
+
+Model Architecture (networks.py)
+- Encoder: lightweight CNN on stacked grayscale frames.
+- Short-term: GRUCell.
+- Mid-term: LSTMCell.
+- Long-term: Simple SSM (diagonal linear recurrence + LayerNorm).
+- Head: linear Q-value readout over concatenated GRU/LSTM/SSM states.
+- Forward returns q_values, updated HierarchicalState, and aux embeddings for intrinsic rewards.
+
+Agent Logic (agent.py)
+- SlimHierarchicalDQN wraps the network, target net, epsilon-greedy policy, and replay buffer.
+- Intrinsic rewards: Random Network Distillation (rnd.py), episodic novelty via visit counts, and optional Bayesian shaping.
+- Bayesian monitor: Beta posteriors over milestones (bayes_quests.py).
+- Hidden state management: masks done envs and detaches stored states when pushed to replay.
+
+Training Loop (train_slim.py)
+- Multi-env rollout (pufferlib vector when available), manual frame stacking, structured features via FlagEncoder.
+- DQN core: replay buffer, target sync, Huber TD loss, epsilon decay, gradient clipping.
+- Rewards: logs and stores decomposed components (env, rnd, novel, bayes) and total; per-step/episode logging via logging_utils.py.
+- Curriculum hook placeholder in curriculum.py for savestate sampling.
+- Debug: debug_rollout.py for quick integration test and optional video dump.
+
+Logging / Video / Cluster
+- logging_utils.py: buffered CSV logging for steps, episodes, and progress stats; PerformanceTracker for SPS/eps-per-hour.
+- video_utils.py: headless MP4/GIF/PNG export (libx264 via imageio) to satisfy SLIM_AGENT_VIDEO_SPEC.
+- Cluster scripts: Daddy/cluster/{slurm_gpu.job, slurm_cpu.job, env_setup.sh}; no changes to Final/epsilon/ or pokemonred_puffer/.
+
+ROM placement
+- Place the Pokémon Red ROM at pokemonred_puffer/red.gb (copied from Final/epsilon/pokemon_rl/pokemon_red.gb) so env steps and smoke tests can run.
