@@ -38,18 +38,37 @@ class AgentConfig:
 
 
 class SlimHierarchicalDQN:
-    def __init__(self, config: AgentConfig, device: torch.device) -> None:
+    def __init__(
+        self,
+        config: AgentConfig,
+        device: torch.device,
+        cnn_channels=None,
+        gru_size: int = 128,
+        lstm_size: int = 128,
+        ssm_size: int = 128,
+        structured_hidden: int = 128,
+    ) -> None:
         self.device = device
         self.config = config
         self.network = SlimHierarchicalQNetwork(
             frame_channels=config.frame_stack,
             num_actions=config.num_actions,
             structured_dim=config.structured_dim,
+            cnn_channels=cnn_channels or (32, 64, 64),
+            gru_size=gru_size,
+            lstm_size=lstm_size,
+            ssm_size=ssm_size,
+            structured_hidden=structured_hidden,
         ).to(device)
         self.target_network = SlimHierarchicalQNetwork(
             frame_channels=config.frame_stack,
             num_actions=config.num_actions,
             structured_dim=config.structured_dim,
+            cnn_channels=cnn_channels or (32, 64, 64),
+            gru_size=gru_size,
+            lstm_size=lstm_size,
+            ssm_size=ssm_size,
+            structured_hidden=structured_hidden,
         ).to(device)
         self.target_network.load_state_dict(self.network.state_dict())
         self.target_network.eval()
@@ -103,12 +122,18 @@ class SlimHierarchicalDQN:
     ) -> Dict[str, torch.Tensor]:
         rnd_reward = self.rnd.intrinsic_reward(aux["ssm"].detach())
         novelty_values = []
+        bayes_shaping = []
         for idx, env_id in enumerate(env_ids):
             key = tuple(milestone_flags[idx].long().cpu().tolist())
             self.novelty_counts[env_id][key] += 1
             novelty_values.append(1.0 / (self.novelty_counts[env_id][key] ** 0.5))
+            # bayesian shaping: more weight when posteriors are confident
+            posterior_mean = milestone_flags[idx].float().mean().item()
+            bayes_shaping.append(posterior_mean)
         novelty_reward = torch.tensor(novelty_values, device=self.device, dtype=torch.float32)
         bayes_reward = self.config.bayes_weight * milestone_flags.float().mean(dim=1)
+        # influence RND by Bayes confidence (elementwise scale)
+        rnd_reward = rnd_reward * (1.0 + torch.tensor(bayes_shaping, device=self.device))
         return {"rnd": rnd_reward, "novel": novelty_reward, "bayes": bayes_reward}
 
     def update_bayes_from_milestones(self, milestones: torch.Tensor) -> Dict[str, Dict[str, float]]:

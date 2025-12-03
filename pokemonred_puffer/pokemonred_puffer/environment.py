@@ -155,6 +155,7 @@ class RedGymEnv(Env):
         self.max_steps_scaling = env_config.max_steps_scaling
         self.map_id_scalefactor = env_config.map_id_scalefactor
         self.action_space = ACTION_SPACE
+        self.use_rubinstein_reward = getattr(env_config, "use_rubinstein_reward", False)
 
         # Obs space-related. TODO: avoid hardcoding?
         self.global_map_shape = GLOBAL_MAP_SHAPE
@@ -1551,7 +1552,7 @@ class RedGymEnv(Env):
                 "pokecenter": np.sum(self.pokecenters),
                 "pokecenter_heal": self.pokecenter_heal,
                 "in_battle": self.read_m("wIsInBattle") > 0,
-                "event": self.progress_reward["event"],
+                "event": self.progress_reward.get("event", 0.0),
                 "max_steps": self.get_max_steps(),
                 # redundant but this is so we don't interfere with the swarm logic
                 "required_count": len(self.required_events) + len(self.required_items),
@@ -1745,16 +1746,88 @@ class RedGymEnv(Env):
 
     def get_game_state_reward(self):
         """
-        Simplified reward for slim agent training.
-        Returns a dictionary so callers expecting per-component rewards still work.
+        Return a dictionary of dense reward components. Two modes are supported:
+        - Rubinstein-style reward (if self.use_rubinstein_reward is True) with a richer
+          set of signals.
+        - Slim composite reward (default) with a smaller subset of signals.
         """
-        # Basic progress signals: badge count and explored tiles sum (if available)
-        badges = self.get_badges() if hasattr(self, "get_badges") else 0
-        explored = float(np.sum(self.explore_map)) if hasattr(self, "explore_map") else 0.0
+        if self.use_rubinstein_reward:
+            return self._rubinstein_reward()
+
+        """
+        Composite reward for slim agent training:
+        - badges: number of obtained badges
+        - explore: sum of exploration map values
+        - required_events: count of required events completed
+        - required_items: count of required items held
+        - event_flags: aggregate event flag progress
+        - deaths: penalty for deaths/blackouts
+        """
+        badges = 0.0
+        explored = 0.0
+        req_events = 0.0
+        req_items = 0.0
+        event_flags = 0.0
+        deaths = 0.0
+        try:
+            badges = float(self.get_badges())
+        except Exception:
+            pass
+        try:
+            explored = float(np.sum(self.explore_map))
+        except Exception:
+            pass
+        try:
+            req_events = float(len(self.get_required_events()))
+        except Exception:
+            pass
+        try:
+            req_items = float(len(self.get_required_items()))
+        except Exception:
+            pass
+        try:
+            event_flags = float(self.get_events_sum())
+        except Exception:
+            pass
+        try:
+            deaths = -float(self.died_count)
+        except Exception:
+            pass
         return {
-            "badges": float(badges),
+            "badges": badges,
             "explore": explored,
+            "required_events": req_events,
+            "required_items": req_items,
+            "event_flags": event_flags,
+            "deaths": deaths,
+            "event": req_events,
         }
+
+    def _rubinstein_reward(self):
+        """
+        Backward-compatible dense reward modeled after the original Rubinstein paper code.
+        Values are intentionally coarse to avoid hard crashes when memory is unavailable.
+        """
+        reward: dict[str, float] = {}
+
+        def safe(fn, default=0.0):
+            try:
+                return float(fn())
+            except Exception:
+                return float(default)
+
+        reward["badges"] = safe(self.get_badges)
+        reward["explore"] = safe(lambda: np.sum(self.explore_map))
+        reward["required_events"] = safe(lambda: len(self.get_required_events()))
+        reward["required_items"] = safe(lambda: len(self.get_required_items()))
+        reward["event_flags"] = safe(self.get_events_sum)
+        reward["map_progress"] = safe(lambda: self.get_map_progress(self.read_m(0xD35E)))
+        reward["level_sum"] = safe(self.get_levels_reward)
+        reward["opponent_level"] = safe(lambda: self.max_opponent_level)
+        reward["deaths"] = -safe(lambda: self.died_count)
+        reward["blackouts"] = -safe(lambda: self.blackout_count)
+        reward["event"] = reward["required_events"]
+        return reward
 
     def seed(self, seed: Optional[int] = None):
         """Minimal seed hook to satisfy gym/pufferlib expectations."""
@@ -1939,10 +2012,17 @@ class RedGymEnv(Env):
         )
 
     def get_required_items(self) -> set[str]:
-        wNumBagItems = self.read_m("wNumBagItems")
-        _, wBagItems = self.pyboy.symbol_lookup("wBagItems")
-        bag_items = self.pyboy.memory[wBagItems : wBagItems + wNumBagItems * 2 : 2]
-        return {Items(item).name for item in bag_items if Items(item) in REQUIRED_ITEMS}
+        try:
+            wNumBagItems = self.read_m("wNumBagItems")
+            if wNumBagItems <= 0:
+                return set()
+            _, wBagItems = self.pyboy.symbol_lookup("wBagItems")
+            end = wBagItems + max(0, wNumBagItems) * 2
+            bag_items = self.pyboy.memory[wBagItems:end:2]
+            return {Items(item).name for item in bag_items if Items(item) in REQUIRED_ITEMS}
+        except Exception:
+            # If the memory window is invalid (e.g., early boot), fail safe.
+            return set()
 
     def get_events_sum(self):
         # adds up all event flags, exclude museum ticket
