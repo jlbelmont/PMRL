@@ -63,3 +63,10 @@ class CurriculumManager:
     def add_state(self, path: Path) -> None:
         if path not in self.savestates:
             self.savestates.append(path)
+
+    def summary(self) -> str:
+        """Human-friendly summary for terminal logs."""
+        total = len(self.savestates)
+        if total == 0:
+            return "savestates=0"
+        return f"savestates={total}"

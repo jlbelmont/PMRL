@@ -27,6 +27,10 @@ class SafeRedEnv(RedGymEnv):
 
     def __init__(self, env_config: DictConfig):
         super().__init__(env_config)
+        # preserve the boolean flag but expose a callable
+        self.save_state_flag = bool(getattr(env_config, "save_state", False))
+        # make save_state callable again (super sets it to a bool)
+        self.save_state = self._save_emulator_state
         self._ensure_init_state()
 
     def _ensure_init_state(self) -> None:
@@ -39,10 +43,8 @@ class SafeRedEnv(RedGymEnv):
         self._ensure_init_state()
         return super().reset(seed=seed, options=options)
 
-    def save_state(self, path: Path) -> None:
-        """
-        Save the current emulator state to a .state file.
-        """
+    def _save_emulator_state(self, path: Path) -> None:
+        """Save the current emulator state to a .state file."""
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
             self.pyboy.save_state(f)
