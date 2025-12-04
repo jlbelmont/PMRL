@@ -54,6 +54,9 @@ def load_env_config(headless: bool) -> Dict:
     env_cfg = OmegaConf.to_container(config.env, resolve=True)
     env_cfg["headless"] = headless
     env_cfg["save_video"] = False
+    # Keep raw pixel layout for inspection/videos (no downsample or bit packing)
+    env_cfg["reduce_res"] = False
+    env_cfg["two_bit"] = False
     assets_root = repo_root / "archive" / "pokemonred_puffer_assets"
     rom_path = assets_root / "red.gb"
     state_dir = assets_root / "pyboy_states"
