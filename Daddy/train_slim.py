@@ -428,7 +428,8 @@ def main() -> None:
     # video buffer (only env 0 to limit size)
     frames_for_video: List[np.ndarray] = []
     video_saved = False
-    
+    min_video_frames = 30  # avoid saving 1-frame videos
+
     # Streaming setup (for viewing best agents on laptop)
     stream_client: Optional[StreamClient] = None
     best_selector: Optional[BestAgentSelector] = None
@@ -557,12 +558,15 @@ def main() -> None:
                 if args.record_video_every and env_idx == 0 and episode_ids[env_idx] % args.record_video_every == 0:
                     Path(args.video_dir).mkdir(parents=True, exist_ok=True)
                     out_path = Path(args.video_dir) / f"train_ep{episode_ids[env_idx]:05d}.mp4"
-                    if frames_for_video:
+                    if frames_for_video and len(frames_for_video) >= min_video_frames:
                         artifacts = maybe_save_video(frames_for_video, "mp4", out_path, fps=15)
                         for art in artifacts:
                             print(f"[video] saved {art['path']} ({art['frames']} frames)")
                             video_saved = True
-                    frames_for_video.clear()
+                        frames_for_video.clear()
+                    else:
+                        # keep buffering until we have enough frames
+                        pass
                 reset_obs, _ = envs.envs[env_idx].reset(seed=args.seed + env_idx)
                 reset_obs = obs_to_dict(reset_obs)
                 for key in next_obs:
@@ -739,6 +743,10 @@ def main() -> None:
     if args.record_video_every and frames_for_video and not video_saved:
         Path(args.video_dir).mkdir(parents=True, exist_ok=True)
         out_path = Path(args.video_dir) / "train_final.mp4"
+        # pad to minimum length if needed
+        if len(frames_for_video) < min_video_frames and frames_for_video:
+            last = frames_for_video[-1]
+            frames_for_video.extend([last] * (min_video_frames - len(frames_for_video)))
         artifacts = maybe_save_video(frames_for_video, "mp4", out_path, fps=15)
         for art in artifacts:
             print(f"[video] saved {art['path']} ({art['frames']} frames)")
