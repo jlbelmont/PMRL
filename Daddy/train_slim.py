@@ -329,11 +329,17 @@ def main() -> None:
 
     env_cfg = load_env_config(headless=args.headless)
 
-    # curriculum setup
-    state_dir = Path(env_cfg["state_dir"])
-    initial_states = sorted(state_dir.glob("*.state"))
-    save_state_dir = Path(args.save_state_dir)
+    # curriculum setup: prefer user-provided savestate directory for both loading and saving
+    save_state_dir = Path(args.save_state_dir).expanduser().resolve()
     save_state_dir.mkdir(parents=True, exist_ok=True)
+    env_cfg["state_dir"] = str(save_state_dir)
+    init_state = env_cfg.get("init_state", "Bulbasaur")
+    init_state_file = save_state_dir / f"{init_state}.state"
+    if not init_state_file.exists():
+        existing_states = sorted(save_state_dir.glob("*.state"))
+        if existing_states:
+            env_cfg["init_state"] = existing_states[0].stem
+    initial_states = sorted(save_state_dir.glob("*.state"))
     curriculum = CurriculumManager(savestates=initial_states)
 
     def env_fn(idx: int):
