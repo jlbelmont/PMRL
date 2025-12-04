@@ -5,6 +5,7 @@ Lightweight rollout script to sanity-check env integration, WRAM flags, and vide
 from __future__ import annotations
 
 import argparse
+import atexit
 from collections import deque
 from pathlib import Path
 from typing import Deque, Dict, List
@@ -17,6 +18,19 @@ from .agent import AgentConfig, SlimHierarchicalDQN
 from .env_utils import SafeRedEnv, SimpleVectorEnv
 from .flags import FlagEncoder
 from .video_utils import maybe_save_video
+from pokemonred_puffer.environment import RedGymEnv
+
+
+def _cleanup_shared_memory():
+    """Close/unlink the global shared memory used by RedGymEnv to silence resource_tracker warnings."""
+    try:
+        RedGymEnv.env_id.close()
+        RedGymEnv.env_id.unlink()
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_shared_memory)
 
 
 def parse_args() -> argparse.Namespace:
