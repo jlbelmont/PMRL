@@ -207,36 +207,6 @@ class SlimHierarchicalDQN:
         self.episodes[env_id] += 1
         self.episode_returns[env_id] = 0.0
 
-    # ------------------------------------------------------------------#
-    # Checkpoint helpers
-    # ------------------------------------------------------------------#
-    def state_dict(self) -> Dict[str, object]:
-        """Return a checkpoint-compatible state dict."""
-        return {
-            "network": self.network.state_dict(),
-            "target_network": self.target_network.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "rnd": self.rnd.state_dict(),
-            "rnd_opt": self.rnd_opt.state_dict(),
-            "epsilon": self.epsilon,
-            "global_step": self.global_step,
-        }
-
-    def load_state_dict(self, state: Dict[str, object]) -> None:
-        """Load checkpoint data; tolerates partial keys."""
-        if "network" in state:
-            self.network.load_state_dict(state["network"])  # type: ignore[arg-type]
-        if "target_network" in state:
-            self.target_network.load_state_dict(state["target_network"])  # type: ignore[arg-type]
-        if "optimizer" in state:
-            self.optimizer.load_state_dict(state["optimizer"])  # type: ignore[arg-type]
-        if "rnd" in state:
-            self.rnd.load_state_dict(state["rnd"])  # type: ignore[arg-type]
-        if "rnd_opt" in state:
-            self.rnd_opt.load_state_dict(state["rnd_opt"])  # type: ignore[arg-type]
-        self.epsilon = state.get("epsilon", self.epsilon)  # type: ignore[assignment]
-        self.global_step = state.get("global_step", self.global_step)  # type: ignore[assignment]
-
     def _stack_states(self, states: List[Optional[HierarchicalState]]) -> HierarchicalState:
         if any(s is None for s in states):
             return self.network.initial_state(batch_size=len(states), device=self.device)

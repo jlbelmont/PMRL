@@ -32,12 +32,12 @@ dependencies = [
     "wandb",
     "websockets"
 ]
-requires-python = ">= 3.10"
+requires-python = ">= 3.9"
 
 [tool.setuptools.packages.find]
 where = ["."]
 exclude = ["tests"]
-include = ["pokered.sym"]
+include = ["pokemonred_puffer", "pokemonred_puffer.*"]
 
 [project.optional-dependencies]
 monitoring = [

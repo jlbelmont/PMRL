@@ -247,12 +247,4 @@ class SlimHierarchicalQNetwork(nn.Module):
         if frames.shape[1] not in (1, 3, 4, 8):
             # assume channel last
             frames = frames.permute(0, 3, 1, 2)
-
-        # Guard against tiny spatial dims from aggressive downsampling/cropping.
-        # Our first conv uses a 3x3 kernel, so ensure H,W are at least 8x8.
-        h, w = frames.shape[-2], frames.shape[-1]
-        if h < 8 or w < 8:
-            pad_h = max(0, 8 - h)
-            pad_w = max(0, 8 - w)
-            frames = F.pad(frames, (0, pad_w, 0, pad_h))
         return frames.float() / 255.0

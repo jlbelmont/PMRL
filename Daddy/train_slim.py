@@ -2,17 +2,21 @@
 Multi-env DQN training loop for the slim hierarchical agent.
 
 Follows the contracts in DESIGN_SLIM_MODEL_V2.md and REWARD_LOGGING_SPEC.md.
+Supports checkpointing and resume for auto-resubmitting SLURM jobs.
 """
 
 from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import random
 import csv
+import signal
+import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, Dict, List
+from typing import Deque, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -24,7 +28,108 @@ from .flags import FlagEncoder
 from .logging_utils import PerformanceTracker, RewardLogger
 from .curriculum import CurriculumManager
 from .video_utils import maybe_save_video
+from .streaming import StreamClient, BestAgentSelector, progress_score
 from pokemonred_puffer.environment import RedGymEnv
+
+
+# Global flag for graceful shutdown
+_shutdown_requested = False
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGINT/SIGTERM for graceful shutdown."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    print("\n[train] Shutdown signal received, will save checkpoint and exit...")
+
+
+def _save_checkpoint(
+    agent: SlimHierarchicalDQN,
+    step: int,
+    episode_ids: np.ndarray,
+    checkpoint_dir: Path,
+    progress_path: Path,
+) -> str:
+    """Save model checkpoint and progress file."""
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save model weights
+    checkpoint_path = checkpoint_dir / f"checkpoint_{step:08d}.pt"
+    torch.save({
+        "step": step,
+        "episode_ids": episode_ids.tolist(),
+        "network_state_dict": agent.network.state_dict(),
+        "target_network_state_dict": agent.target_network.state_dict(),
+        "optimizer_state_dict": agent.optimizer.state_dict(),
+        "rnd_state_dict": agent.rnd.state_dict(),
+        "rnd_opt_state_dict": agent.rnd_opt.state_dict(),
+        "epsilon": agent.epsilon,
+        "global_step": agent.global_step,
+    }, checkpoint_path)
+    
+    # Save progress file (for orchestrator to track)
+    progress_data = {
+        "env_steps": step,
+        "episodes": int(episode_ids.sum()),
+        "last_checkpoint": str(checkpoint_path),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(progress_path, "w") as f:
+        json.dump(progress_data, f, indent=2)
+    
+    # Also save "latest" symlink/copy for easy resuming
+    latest_path = checkpoint_dir / "latest.pt"
+    torch.save(torch.load(checkpoint_path), latest_path)
+    
+    return str(checkpoint_path)
+
+
+def _load_checkpoint(
+    agent: SlimHierarchicalDQN,
+    checkpoint_path: Path,
+    device: torch.device,
+) -> tuple[int, np.ndarray]:
+    """Load model checkpoint and return (step, episode_ids)."""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    agent.network.load_state_dict(checkpoint["network_state_dict"])
+    agent.target_network.load_state_dict(checkpoint["target_network_state_dict"])
+    agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    agent.rnd.load_state_dict(checkpoint["rnd_state_dict"])
+    agent.rnd_opt.load_state_dict(checkpoint["rnd_opt_state_dict"])
+    agent.epsilon = checkpoint["epsilon"]
+    agent.global_step = checkpoint["global_step"]
+    
+    step = checkpoint["step"]
+    episode_ids = np.array(checkpoint["episode_ids"], dtype=np.int64)
+    
+    return step, episode_ids
+
+
+def _find_latest_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
+    """Find the latest checkpoint file in the directory."""
+    if not checkpoint_dir.exists():
+        return None
+    
+    # Try latest.pt first
+    latest = checkpoint_dir / "latest.pt"
+    if latest.exists():
+        return latest
+    
+    # Otherwise find most recent numbered checkpoint
+    checkpoints = sorted(checkpoint_dir.glob("checkpoint_*.pt"))
+    return checkpoints[-1] if checkpoints else None
+
+
+def _cleanup_old_checkpoints(checkpoint_dir: Path, max_keep: int = 6) -> None:
+    """Remove old checkpoints, keeping only the most recent ones."""
+    checkpoints = sorted(checkpoint_dir.glob("checkpoint_*.pt"))
+    if len(checkpoints) > max_keep:
+        for old_ckpt in checkpoints[:-max_keep]:
+            try:
+                old_ckpt.unlink()
+            except Exception:
+                pass
 
 
 def _cleanup_shared_memory():
@@ -56,7 +161,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bayes-weight", type=float, default=0.05)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--mode", choices=["train", "eval"], default="train")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint for eval.")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint for eval or resume.")
     parser.add_argument("--save-state-dir", type=str, default="Daddy/savestates", help="Where to save new .state files.")
     parser.add_argument("--save-state-every", type=int, default=0, help="Save a savestate every N episodes per env (0 to disable).")
     parser.add_argument("--save-state-on-bayes", action="store_true", help="Save a savestate when Bayes milestones update.")
@@ -73,6 +178,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--headless", action="store_true", help="Force headless emulator")
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.set_defaults(headless=True)
+    # Checkpointing and cluster support
+    parser.add_argument("--checkpoint-dir", type=str, default=None, help="Directory to save model checkpoints (defaults to log_dir/checkpoints).")
+    parser.add_argument("--checkpoint-interval", type=int, default=10000, help="Save checkpoint every N steps.")
+    parser.add_argument("--max-runtime-seconds", type=int, default=0, help="Exit gracefully after N seconds (0 = unlimited, use 13500 for 4hr SLURM jobs).")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint in checkpoint-dir.")
+    parser.add_argument("--max-checkpoints", type=int, default=6, help="Maximum number of checkpoints to keep.")
+    # Streaming (for viewing best agents on laptop)
+    parser.add_argument("--stream", action="store_true", help="Enable streaming to laptop viewer.")
+    parser.add_argument("--stream-port", type=int, default=9999, help="Port for streaming (reverse SSH tunnel).")
+    parser.add_argument("--stream-interval", type=int, default=60, help="Send frame every N steps.")
+    parser.add_argument("--stream-top-k", type=int, default=2, help="Number of best agents to stream.")
+    parser.add_argument("--stream-candidates-path", type=str, default=None, help="Path to shared candidates JSON (for multi-job coordination).")
+    parser.add_argument("--job-rank", type=int, default=0, help="DDP job rank (for streaming coordination).")
     return parser.parse_args()
 
 
@@ -149,10 +267,7 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
         # frames already (H, W, 1); stack -> (T, H, W)
         arr = np.stack(list(frames), axis=0)
         if arr.ndim == 4:
-            if arr.shape[-1] in (1, 3):
-                arr = arr[..., 0]
-            elif arr.shape[1] in (1, 3):
-                arr = arr[:, 0, ...]
+            arr = arr[..., 0]
         stacked.append(arr)
     return np.stack(stacked, axis=0)
 
@@ -162,11 +277,25 @@ def to_torch_batch(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[str
 
 
 def main() -> None:
+    global _shutdown_requested
+    
     args = parse_args()
     set_seed(args.seed)
     device = torch.device(args.device)
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Setup checkpointing paths
+    checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else log_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = log_dir / "progress.json"
+    
+    # Setup signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    
+    # Track start time for max_runtime_seconds
+    start_time = time.time()
 
     env_cfg = load_env_config(headless=args.headless)
 
@@ -238,13 +367,51 @@ def main() -> None:
         ],
     )
     pos_writer.writeheader()
+    
+    # Handle checkpointing: resume from checkpoint if requested
+    start_step = 0
     if args.mode == "eval" and args.checkpoint:
         agent.load_state_dict(torch.load(args.checkpoint, map_location=device))
         agent.epsilon = 0.0
         agent.epsilon_min = 0.0
+    elif args.resume or (args.mode == "train" and args.checkpoint):
+        # Resume training from checkpoint
+        resume_path = None
+        if args.checkpoint:
+            resume_path = Path(args.checkpoint)
+        else:
+            resume_path = _find_latest_checkpoint(checkpoint_dir)
+        
+        if resume_path and resume_path.exists():
+            print(f"[train] Resuming from checkpoint: {resume_path}")
+            start_step, episode_ids = _load_checkpoint(agent, resume_path, device)
+            print(f"[train] Resumed at step {start_step}, episodes: {episode_ids.tolist()}")
+        else:
+            print("[train] No checkpoint found, starting fresh.")
 
     # video buffer (only env 0 to limit size)
     frames_for_video: List[np.ndarray] = []
+    
+    # Streaming setup (for viewing best agents on laptop)
+    stream_client: Optional[StreamClient] = None
+    best_selector: Optional[BestAgentSelector] = None
+    should_stream: Dict[int, bool] = {i: False for i in range(args.num_envs)}
+    
+    if args.stream:
+        print(f"[train] Streaming enabled on port {args.stream_port}")
+        stream_client = StreamClient(
+            port=args.stream_port,
+            interval_steps=args.stream_interval,
+            metadata={"job_rank": args.job_rank},
+        )
+        
+        # Setup best selector for multi-job coordination
+        candidates_path = args.stream_candidates_path or str(log_dir / "stream_candidates.json")
+        best_selector = BestAgentSelector(
+            candidates_path=candidates_path,
+            top_k=args.stream_top_k,
+        )
+        print(f"[train] Stream candidates: {candidates_path}")
 
     states = agent.reset_hidden(args.num_envs)
     dones = np.zeros(args.num_envs, dtype=bool)
@@ -256,8 +423,26 @@ def main() -> None:
     episode_lengths = np.zeros(args.num_envs, dtype=np.int32)
     episode_ids = np.zeros(args.num_envs, dtype=np.int64)
     agent.epsilon_decay = (1.0 - agent.epsilon_min) / max(1, args.total_steps)
+    
+    # Track last checkpoint time
+    last_checkpoint_step = start_step
 
-    for step in range(args.total_steps):
+    for step in range(start_step, args.total_steps):
+        # Check for graceful shutdown
+        if _shutdown_requested:
+            print(f"[train] Shutdown requested at step {step}, saving checkpoint...")
+            ckpt_path = _save_checkpoint(agent, step, episode_ids, checkpoint_dir, progress_path)
+            print(f"[train] Saved checkpoint: {ckpt_path}")
+            break
+        
+        # Check max runtime
+        if args.max_runtime_seconds > 0:
+            elapsed = time.time() - start_time
+            if elapsed >= args.max_runtime_seconds:
+                print(f"[train] Max runtime ({args.max_runtime_seconds}s) reached at step {step}, saving checkpoint...")
+                ckpt_path = _save_checkpoint(agent, step, episode_ids, checkpoint_dir, progress_path)
+                print(f"[train] Saved checkpoint: {ckpt_path}")
+                break
         frame_batch = torch.as_tensor(stack_frames(frame_stacks), device=device)
         obs_tensors = to_torch_batch(obs, device=device)
         structured, milestone_flags = agent.flag_encoder(obs_tensors)
@@ -445,14 +630,73 @@ def main() -> None:
             if args.record_video_every and env_idx == 0:
                 frame_rgb = np.repeat(obs["screen"][env_idx], repeats=3, axis=-1)
                 frames_for_video.append(frame_rgb)
+            
+            # Streaming: update best selector and maybe send frame
+            if best_selector is not None and stream_client is not None:
+                # Build info dict for progress scoring
+                info = infos[env_idx] if isinstance(infos, (list, tuple)) else {}
+                if isinstance(info, dict):
+                    stream_info = {
+                        "badge_count": info.get("stats", {}).get("badge", 0) if isinstance(info.get("stats"), dict) else 0,
+                        "story_flags": info.get("events", {}),
+                    }
+                else:
+                    stream_info = {"badge_count": 0, "story_flags": {}}
+                
+                agent_id = f"job{args.job_rank}_env{env_idx}"
+                should_stream[env_idx] = best_selector.update(
+                    agent_id=agent_id,
+                    info=stream_info,
+                    episode_reward=float(episode_total[env_idx]),
+                    env_idx=env_idx,
+                    job_rank=args.job_rank,
+                )
+                
+                # Send frame if this agent is in top-K
+                if should_stream[env_idx]:
+                    frame = obs["screen"][env_idx]
+                    if frame.ndim == 2:
+                        frame = np.expand_dims(frame, -1)
+                    if frame.shape[-1] == 1:
+                        frame = np.repeat(frame, 3, axis=-1)
+                    
+                    score, _ = progress_score(stream_info, float(episode_total[env_idx]))
+                    stream_client.maybe_send(
+                        frame=frame,
+                        step=step,
+                        agent_id=agent_id,
+                        extra_meta={
+                            "score": score,
+                            "episode_reward": float(episode_total[env_idx]),
+                            "episode_id": int(episode_ids[env_idx]),
+                        },
+                    )
 
         perf.step(args.num_envs)
         if step % max(1, args.log_interval) == 0 and step > 0:
             stats = perf.stats()
             print(f"step {step} | SPS {stats['sps']:.1f} | episodes/hr {stats['episodes_per_hour']:.1f}")
+        
+        # Periodic checkpoint saving
+        if args.mode == "train" and args.checkpoint_interval > 0:
+            if (step - last_checkpoint_step) >= args.checkpoint_interval:
+                ckpt_path = _save_checkpoint(agent, step, episode_ids, checkpoint_dir, progress_path)
+                print(f"[train] Checkpoint saved: {ckpt_path}")
+                _cleanup_old_checkpoints(checkpoint_dir, args.max_checkpoints)
+                last_checkpoint_step = step
 
+    # Final checkpoint on normal completion
+    if args.mode == "train" and not _shutdown_requested:
+        final_step = min(step + 1, args.total_steps) if 'step' in dir() else args.total_steps
+        ckpt_path = _save_checkpoint(agent, final_step, episode_ids, checkpoint_dir, progress_path)
+        print(f"[train] Final checkpoint saved: {ckpt_path}")
+    
+    # Cleanup
+    if stream_client is not None:
+        stream_client.close()
     reward_logger.close()
     envs.close()
+    print("[train] Training complete.")
 
 
 if __name__ == "__main__":

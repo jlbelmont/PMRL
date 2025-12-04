@@ -6,7 +6,7 @@ from abc import abstractmethod
 from collections import deque
 from multiprocessing import Lock, shared_memory
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Union
 
 import mediapy as media
 import numpy as np
@@ -1218,15 +1218,16 @@ class RedGymEnv(Env):
                         self.pyboy.memory[self.pyboy.symbol_lookup("wRepelRemainingSteps")[1]] = (
                             0xFF
                         )
-                        match step:
-                            case str(button):
-                                self.pyboy.button(button, 8)
-                                self.pyboy.tick(self.action_freq * 2, self.animate_scripts)
-                            case (str(button), int(button_freq), int(action_freq)):
-                                self.pyboy.button(button, button_freq)
-                                self.pyboy.tick(action_freq, self.animate_scripts)
-                            case _:
-                                raise
+                        # Python 3.9 compatible version (converted from match statement)
+                        if isinstance(step, str):
+                            self.pyboy.button(step, 8)
+                            self.pyboy.tick(self.action_freq * 2, self.animate_scripts)
+                        elif isinstance(step, tuple) and len(step) == 3:
+                            button, button_freq, action_freq = step
+                            self.pyboy.button(button, button_freq)
+                            self.pyboy.tick(action_freq, self.animate_scripts)
+                        else:
+                            raise ValueError(f"Unknown step type: {step}")
                         while self.read_m("wJoyIgnore"):
                             self.pyboy.tick(self.action_freq, render=False)
                     self.pyboy.memory[self.pyboy.symbol_lookup("wRepelRemainingSteps")[1]] = (
@@ -1717,18 +1718,18 @@ class RedGymEnv(Env):
         self.total_reward = new_total
         return new_step
 
-    def read_m(self, addr: str | int) -> int:
+    def read_m(self, addr: Union[str, int]) -> int:
         if isinstance(addr, str):
             return self.pyboy.memory[self.pyboy.symbol_lookup(addr)[1]]
         return self.pyboy.memory[addr]
 
-    def read_short(self, addr: str | int) -> int:
+    def read_short(self, addr: Union[str, int]) -> int:
         if isinstance(addr, str):
             _, addr = self.pyboy.symbol_lookup(addr)
         data = self.pyboy.memory[addr : addr + 2]
         return int(data[0] << 8) + int(data[1])
 
-    def read_bit(self, addr: str | int, bit: int) -> bool:
+    def read_bit(self, addr: Union[str, int], bit: int) -> bool:
         # add padding so zero will read '0b100000000' instead of '0b0'
         return bool(int(self.read_m(addr)) & (1 << bit))
 

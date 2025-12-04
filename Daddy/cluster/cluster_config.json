@@ -1,0 +1,82 @@
+{
+  "run_name": "slim_run",
+  "run_dir": "runs/slim_run",
+  
+  "training": {
+    "total_steps": 5000000,
+    "batch_size": 64,
+    "buffer_size": 100000,
+    "learning_starts": 5000,
+    "train_every": 4,
+    "target_update": 2000,
+    "num_envs": 8,
+    "frame_stack": 4,
+    "seed": 7,
+    
+    "rnd_weight": 0.1,
+    "novelty_weight": 0.05,
+    "bayes_weight": 0.05,
+    
+    "device": "cuda",
+    
+    "cnn_channels": "32,64,64",
+    "gru_size": 128,
+    "lstm_size": 128,
+    "ssm_size": 128,
+    "structured_hidden": 128,
+    
+    "log_interval": 500,
+    "mode": "train",
+    
+    "checkpoint_interval": 10000,
+    "max_checkpoints": 6,
+    
+    "stream": true,
+    "stream_port": 9999,
+    "stream_interval": 60,
+    "stream_top_k": 2,
+    "stream_candidates_path": "runs/slim_run/stream_candidates.json"
+  },
+  
+  "slurm": {
+    "partition": "gpu-linuxlab",
+    "account": "engr-class-any",
+    "gpus": 1,
+    "cpus": 8,
+    "mem_per_gpu": "20G",
+    "hours": 4,
+    "exclude_nodes": "r40a-02,r40a-03"
+  },
+  
+  "collaboration": {
+    "enabled": true,
+    "shared_dir": "/project/scratch01/compiling/a.a.baggio/PokemonRedExperiments/shared_weights",
+    "sync_interval_steps": 5000,
+    "polyak_alpha": 0.5,
+    "fingerprint_required": false,
+    "allowed_user_ids": []
+  },
+  
+  "streaming": {
+    "enabled": true,
+    "top_k": 2,
+    "tunnel_port": 9999,
+    "interval_steps": 60
+  },
+  
+  "puffer_speedups": {
+    "enabled": true,
+    "swarm": true,
+    "swarm_policy": "top_all",
+    "swarm_cooldown_steps": 500,
+    "archive_dir": "swarm_archive"
+  },
+  
+  "checkpointing": {
+    "interval_minutes": 15,
+    "max_keep": 6
+  },
+  
+  "max_runtime_seconds": 13500
+}
+

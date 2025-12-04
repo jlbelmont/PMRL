@@ -70,10 +70,7 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
     for frames in frame_stacks:
         arr = np.stack(list(frames), axis=0)
         if arr.ndim == 4:
-            if arr.shape[-1] in (1, 3):
-                arr = arr[..., 0]  # channel last
-            elif arr.shape[1] in (1, 3):
-                arr = arr[:, 0, ...]  # channel first
+            arr = arr[..., 0]
         stacked.append(arr)
     return np.stack(stacked, axis=0)
 
