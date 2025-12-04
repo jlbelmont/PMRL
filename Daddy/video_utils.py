@@ -12,17 +12,34 @@ from typing import Iterable, List
 
 import imageio
 import numpy as np
+import math
 
 
 def _ensure_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _to_game_size(frame: np.ndarray, target_hw: tuple[int, int] = (144, 160)) -> np.ndarray:
+    """
+    Upscale frames with nearest-neighbor to match original Game Boy resolution (144x160).
+    Only scales up; keeps aspect ratio by using the max scale factor and crops if slightly over.
+    """
+    if frame.ndim < 2:
+        return frame
+    target_h, target_w = target_hw
+    h, w = frame.shape[:2]
+    if h == target_h and w == target_w:
+        return frame
+    scale = max(math.ceil(target_h / h), math.ceil(target_w / w), 1)
+    up = np.repeat(np.repeat(frame, scale, axis=0), scale, axis=1)
+    return up[:target_h, :target_w]  # crop if we overshoot
+
+
 def save_mp4(frames: Iterable[np.ndarray], path: str | Path, fps: int = 30) -> dict:
     start = time.time()
     path = Path(path)
     _ensure_dir(path)
-    frames_list = list(frames)
+    frames_list = [_to_game_size(f) for f in frames]
     imageio.mimsave(path, frames_list, fps=fps, codec="libx264", macro_block_size=1)
     duration = time.time() - start
     return {
@@ -39,7 +56,7 @@ def save_gif(frames: Iterable[np.ndarray], path: str | Path, fps: int = 15) -> d
     start = time.time()
     path = Path(path)
     _ensure_dir(path)
-    frames_list = list(frames)
+    frames_list = [_to_game_size(f) for f in frames]
     imageio.mimsave(path, frames_list, fps=fps)
     duration = time.time() - start
     return {
