@@ -80,6 +80,18 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="If >0, prune mastered savestates every N steps (uses CurriculumManager.promote_or_demote). Off by default.",
     )
+    p.add_argument(
+        "--max-states",
+        type=int,
+        default=0,
+        help="Optional hard cap on total savestates (0 disables). Removes oldest first.",
+    )
+    p.add_argument(
+        "--max-states-per-prefix",
+        type=int,
+        default=0,
+        help="Optional cap per prefix category (mapXYZ, badgeXX, epYYY); 0 disables.",
+    )
     p.add_argument("--model-size", choices=list(MODEL_PRESETS.keys()), default="large")
     p.add_argument("--headless", action="store_true", help="Force headless emulator")
     p.add_argument("--no-headless", dest="headless", action="store_false")
@@ -187,7 +199,11 @@ def main() -> None:
     initial_states = sorted(state_dir.glob("*.state"))
     save_state_dir = Path(args.save_state_dir) / args.run_name
     save_state_dir.mkdir(parents=True, exist_ok=True)
-    curriculum = CurriculumManager(savestates=initial_states)
+    curriculum = CurriculumManager(
+        savestates=initial_states,
+        max_total=args.max_states,
+        max_per_prefix=args.max_states_per_prefix,
+    )
 
     def env_fn(idx: int):
         return make_env(env_cfg, seed=args.seed + idx)
