@@ -71,7 +71,7 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
     Mirrors the stack_frames used in train_big/train_slim:
       * squeezes stray singleton dims that appear from wrappers,
       * normalizes to channel-first,
-      * guarantees at least 8x8 spatial size by repeat/pad,
+      * guarantees at least 36x36 spatial size by repeat/pad,
       * merges time into channels.
     """
     batches: List[np.ndarray] = []
@@ -100,16 +100,17 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
 
         _, _, h, w = arr.shape
 
-        # Repeat to reach minimum spatial size for conv kernels
-        rep_h = (8 + h - 1) // h
-        rep_w = (8 + w - 1) // w
+        # Repeat to reach minimum spatial size for conv kernels (needs >=36 to survive 8/4/3 convs)
+        min_hw = 36
+        rep_h = (min_hw + h - 1) // h
+        rep_w = (min_hw + w - 1) // w
         if rep_h > 1 or rep_w > 1:
             arr = np.repeat(np.repeat(arr, rep_h, axis=2), rep_w, axis=3)
             h, w = arr.shape[2], arr.shape[3]
 
         # Pad if still undersized
-        pad_h = max(0, 8 - h)
-        pad_w = max(0, 8 - w)
+        pad_h = max(0, min_hw - h)
+        pad_w = max(0, min_hw - w)
         if pad_h or pad_w:
             arr = np.pad(arr, ((0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode="edge")
 
@@ -118,8 +119,8 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
         merged = arr.reshape(t * c, h, w).astype(np.float32)
         # Final safety: ensure spatial dims still meet conv expectations
         mh, mw = merged.shape[1], merged.shape[2]
-        pad_h = max(0, 8 - mh)
-        pad_w = max(0, 8 - mw)
+        pad_h = max(0, min_hw - mh)
+        pad_w = max(0, min_hw - mw)
         if pad_h or pad_w:
             merged = np.pad(merged, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
         batches.append(merged)

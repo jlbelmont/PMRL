@@ -271,7 +271,9 @@ class SlimHierarchicalQNetwork(nn.Module):
             frames = frames / 255.0
 
         _, _, h, w = frames.shape
-        min_hw = 8
+        # Minimum spatial size needed so 3-layer CNN (8/4/3 kernels, strides 4/2/1) stays valid:
+        # floor((floor((H-8)/4)+1 - 4)/2)+1 >= 3 -> H,W >= 36
+        min_hw = 36
         if h < min_hw or w < min_hw:
             frames = F.interpolate(frames, size=(max(h, min_hw), max(w, min_hw)), mode="nearest")
 

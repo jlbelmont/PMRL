@@ -265,7 +265,7 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
     """
     Convert per-env deques of frames into a channel-first batch tensor.
     - Accepts channel-first or channel-last frames.
-    - Pads tiny frames to at least 8x8 to avoid conv kernel issues.
+    - Pads tiny frames to at least 36x36 to avoid conv kernel issues with 8/4/3 kernels.
     - Merges time into channels: (T, C, H, W) -> (T*C, H, W).
     """
     stacked: List[np.ndarray] = []
@@ -287,9 +287,10 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
 
         # Pad spatially if needed
         _, _, h, w = arr.shape
-        if h < 8 or w < 8:
-            rep_h = (8 + h - 1) // h
-            rep_w = (8 + w - 1) // w
+        min_hw = 36
+        if h < min_hw or w < min_hw:
+            rep_h = (min_hw + h - 1) // h
+            rep_w = (min_hw + w - 1) // w
             arr = np.repeat(np.repeat(arr, rep_h, axis=2), rep_w, axis=3)
 
         # Merge time into channels

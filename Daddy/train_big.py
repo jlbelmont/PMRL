@@ -153,7 +153,7 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
     """
     Convert a list of frame deques into (B, C, H, W) ready for the network.
     Ensures channel-first layout, merges the temporal dimension into channels,
-    and guards against tiny spatial sizes by repeating/padding to at least 8x8.
+    and guards against tiny spatial sizes by repeating/padding to at least 36x36.
     """
     batches: List[np.ndarray] = []
     for frames in frame_stacks:
@@ -180,15 +180,16 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
         _, _, h, w = arr.shape
 
         # Repeat to reach minimum spatial size for conv kernels
-        rep_h = (8 + h - 1) // h
-        rep_w = (8 + w - 1) // w
+        min_hw = 36
+        rep_h = (min_hw + h - 1) // h
+        rep_w = (min_hw + w - 1) // w
         if rep_h > 1 or rep_w > 1:
             arr = np.repeat(np.repeat(arr, rep_h, axis=2), rep_w, axis=3)
             h, w = arr.shape[2], arr.shape[3]
 
         # Pad if still undersized
-        pad_h = max(0, 8 - h)
-        pad_w = max(0, 8 - w)
+        pad_h = max(0, min_hw - h)
+        pad_w = max(0, min_hw - w)
         if pad_h or pad_w:
             arr = np.pad(arr, ((0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode="edge")
 
@@ -196,9 +197,9 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
         t, c, h, w = arr.shape
         merged = arr.reshape(t * c, h, w).astype(np.float32)
         # Final safety: ensure conv kernels always have room
-        if merged.shape[1] < 8 or merged.shape[2] < 8:
-            pad_h = max(0, 8 - merged.shape[1])
-            pad_w = max(0, 8 - merged.shape[2])
+        if merged.shape[1] < min_hw or merged.shape[2] < min_hw:
+            pad_h = max(0, min_hw - merged.shape[1])
+            pad_w = max(0, min_hw - merged.shape[2])
             merged = np.pad(merged, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
         batches.append(merged)
 
