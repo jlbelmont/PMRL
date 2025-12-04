@@ -149,7 +149,10 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
         # frames already (H, W, 1); stack -> (T, H, W)
         arr = np.stack(list(frames), axis=0)
         if arr.ndim == 4:
-            arr = arr[..., 0]
+            if arr.shape[-1] in (1, 3):
+                arr = arr[..., 0]
+            elif arr.shape[1] in (1, 3):
+                arr = arr[:, 0, ...]
         stacked.append(arr)
     return np.stack(stacked, axis=0)
 
