@@ -86,6 +86,8 @@ class RewardLogger:
         quest_id: Optional[int] = None,
         posterior_mean: Optional[float] = None,
         alarm_score: Optional[float] = None,
+        rnd_scale: Optional[float] = None,
+        rnd_raw: Optional[float] = None,
     ) -> None:
         record = {
             "step_global": step_global,
@@ -104,6 +106,8 @@ class RewardLogger:
             "quest_id": quest_id if quest_id is not None else -1,
             "posterior_mean": posterior_mean if posterior_mean is not None else -1.0,
             "alarm_score": alarm_score if alarm_score is not None else -1.0,
+            "rnd_scale": rnd_scale if rnd_scale is not None else 1.0,
+            "rnd_raw": rnd_raw if rnd_raw is not None else -1.0,
         }
         if milestone_flags is not None:
             record["milestone_flags"] = ";".join(map(str, milestone_flags))

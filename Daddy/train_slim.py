@@ -631,6 +631,9 @@ def main() -> None:
         obs = next_obs
 
         for env_idx in range(args.num_envs):
+            post_mean = float(intrinsic["posterior_mean"][env_idx].item())
+            rnd_scale = float(intrinsic["bayes_scale"][env_idx].item())
+            rnd_raw = float(intrinsic["rnd_raw"][env_idx].item())
             reward_logger.log_step(
                 step_global=step,
                 env_id=env_idx,
@@ -645,6 +648,9 @@ def main() -> None:
                 weights={"rnd": args.rnd_weight, "novel": args.novelty_weight, "bayes": args.bayes_weight},
                 milestone_flags=milestone_flags[env_idx].detach().cpu().tolist(),
                 map_id=int(obs["map_id"][env_idx]) if "map_id" in obs else None,
+                posterior_mean=post_mean,
+                rnd_scale=rnd_scale,
+                rnd_raw=rnd_raw,
             )
             if env_idx in bayes_updates:
                 for name, stats in bayes_updates[env_idx].items():

@@ -120,21 +120,30 @@ class SlimHierarchicalDQN:
     def intrinsic_rewards(
         self, aux: Dict[str, torch.Tensor], milestone_flags: torch.Tensor, env_ids: Sequence[int]
     ) -> Dict[str, torch.Tensor]:
-        rnd_reward = self.rnd.intrinsic_reward(aux["ssm"].detach())
+        rnd_raw = self.rnd.intrinsic_reward(aux["ssm"].detach())
         novelty_values = []
-        bayes_shaping = []
+        posterior_means = []
         for idx, env_id in enumerate(env_ids):
             key = tuple(milestone_flags[idx].long().cpu().tolist())
             self.novelty_counts[env_id][key] += 1
             novelty_values.append(1.0 / (self.novelty_counts[env_id][key] ** 0.5))
             # bayesian shaping: more weight when posteriors are confident
             posterior_mean = milestone_flags[idx].float().mean().item()
-            bayes_shaping.append(posterior_mean)
+            posterior_means.append(posterior_mean)
         novelty_reward = torch.tensor(novelty_values, device=self.device, dtype=torch.float32)
-        bayes_reward = self.config.bayes_weight * milestone_flags.float().mean(dim=1)
+        posterior_tensor = torch.tensor(posterior_means, device=self.device, dtype=torch.float32)
+        bayes_reward = self.config.bayes_weight * posterior_tensor
         # influence RND by Bayes confidence (elementwise scale)
-        rnd_reward = rnd_reward * (1.0 + torch.tensor(bayes_shaping, device=self.device))
-        return {"rnd": rnd_reward, "novel": novelty_reward, "bayes": bayes_reward}
+        bayes_scale = 1.0 + posterior_tensor
+        rnd_reward = rnd_raw * bayes_scale
+        return {
+            "rnd": rnd_reward,
+            "rnd_raw": rnd_raw,
+            "bayes_scale": bayes_scale,
+            "posterior_mean": posterior_tensor,
+            "novel": novelty_reward,
+            "bayes": bayes_reward,
+        }
 
     def update_bayes_from_milestones(self, milestones: torch.Tensor) -> Dict[str, Dict[str, float]]:
         milestone_dict = {f"flag_{i}": bool(m.item()) for i, m in enumerate(milestones)}
