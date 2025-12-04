@@ -209,7 +209,8 @@ def load_env_config(headless: bool) -> Dict:
     env_cfg = OmegaConf.to_container(config.env, resolve=True)
     env_cfg["headless"] = headless
     env_cfg["save_video"] = False
-    # Ensure spatial dims stay reasonable for the CNN (avoid two_bit shrink).
+    # Preserve native resolution for videos and CNN prep (no downsample or bit-packing).
+    env_cfg["reduce_res"] = False
     env_cfg["two_bit"] = False
     # Resolve asset locations (ROM + savestates). Prefer archive consolidation.
     assets_root = repo_root / "archive" / "pokemonred_puffer_assets"
