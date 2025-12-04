@@ -12,7 +12,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 from torch import nn
-from torch.nn import functional as F
+import torch.nn.functional as F
 
 
 @dataclass
@@ -198,6 +198,14 @@ class SlimHierarchicalQNetwork(nn.Module):
         device = frames.device
         batch_size = frames.shape[0]
         frames = self._prepare_frames(frames)
+        expected_c = self.cnn.encoder[0].in_channels
+        current_c = frames.shape[1]
+        if current_c != expected_c:
+            if current_c < expected_c:
+                repeat_factor = (expected_c + current_c - 1) // current_c
+                frames = frames.repeat(1, repeat_factor, 1, 1)[:, :expected_c, ...]
+            else:
+                frames = frames[:, :expected_c, ...]
         cnn_out = self.cnn(frames)
         self._prepare_recurrent_cells(cnn_out)
 
@@ -234,17 +242,37 @@ class SlimHierarchicalQNetwork(nn.Module):
     @staticmethod
     def _prepare_frames(frames: torch.Tensor) -> torch.Tensor:
         """
-        Ensure frames are channel-first float tensors scaled to [0, 1].
-        Accepts (B, T, H, W) or (B, H, W, T).
+        Normalize frames to contiguous float32 [B, C, H, W].
+        Accept numpy/torch, 2-5D, channel-last or -first, optional time dim.
+        Drop alpha, scale if max>1.5, upsample tiny spatial dims to at least 8x8.
         """
-        if frames.dim() != 4:
-            raise ValueError(f"Expected 4D frames, got shape {frames.shape}")
+        frames = torch.as_tensor(frames)
+        channel_last_alpha = frames.dim() >= 3 and frames.shape[-1] == 4
+        if frames.dim() == 5:
+            if frames.shape[-1] in (1, 3, 4):
+                frames = frames.permute(0, 1, 4, 2, 3)
+            frames = frames.reshape(-1, *frames.shape[2:])
+        elif frames.dim() == 4:
+            if frames.shape[-1] in (1, 3, 4):
+                frames = frames.permute(0, 3, 1, 2)
+        elif frames.dim() == 3:
+            if frames.shape[-1] in (1, 3, 4):
+                frames = frames.permute(2, 0, 1)
+            frames = frames.unsqueeze(0)
+        elif frames.dim() == 2:
+            frames = frames.unsqueeze(0).unsqueeze(0)
+        else:
+            raise ValueError(f"Expected 2-5D frames, got shape {frames.shape}")
 
-        # If an extra leading dim is present (e.g., (B,1,T,H,W)), squeeze it
-        if frames.dim() == 5 and frames.shape[1] == 1:
-            frames = frames.squeeze(1)
+        if channel_last_alpha and frames.shape[1] == 4:
+            frames = frames[:, :3, ...]
+        frames = frames.to(dtype=torch.float32, copy=False)
+        if frames.max() > 1.5:
+            frames = frames / 255.0
 
-        if frames.shape[1] not in (1, 3, 4, 8):
-            # assume channel last
-            frames = frames.permute(0, 3, 1, 2)
-        return frames.float() / 255.0
+        _, _, h, w = frames.shape
+        min_hw = 8
+        if h < min_hw or w < min_hw:
+            frames = F.interpolate(frames, size=(max(h, min_hw), max(w, min_hw)), mode="nearest")
+
+        return frames.contiguous()
