@@ -421,6 +421,7 @@ def main() -> None:
 
     # video buffer (only env 0 to limit size)
     frames_for_video: List[np.ndarray] = []
+    video_saved = False
     
     # Streaming setup (for viewing best agents on laptop)
     stream_client: Optional[StreamClient] = None
@@ -554,6 +555,7 @@ def main() -> None:
                         artifacts = maybe_save_video(frames_for_video, "mp4", out_path, fps=15)
                         for art in artifacts:
                             print(f"[video] saved {art['path']} ({art['frames']} frames)")
+                            video_saved = True
                     frames_for_video.clear()
                 reset_obs, _ = envs.envs[env_idx].reset(seed=args.seed + env_idx)
                 reset_obs = obs_to_dict(reset_obs)
@@ -726,6 +728,14 @@ def main() -> None:
         final_step = min(step + 1, args.total_steps) if 'step' in dir() else args.total_steps
         ckpt_path = _save_checkpoint(agent, final_step, episode_ids, checkpoint_dir, progress_path)
         print(f"[train] Final checkpoint saved: {ckpt_path}")
+
+    # If no video was emitted (e.g., no episodes completed), emit one from buffered frames.
+    if args.record_video_every and frames_for_video and not video_saved:
+        Path(args.video_dir).mkdir(parents=True, exist_ok=True)
+        out_path = Path(args.video_dir) / "train_final.mp4"
+        artifacts = maybe_save_video(frames_for_video, "mp4", out_path, fps=15)
+        for art in artifacts:
+            print(f"[video] saved {art['path']} ({art['frames']} frames)")
     
     # Cleanup
     if stream_client is not None:
