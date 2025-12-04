@@ -14,24 +14,6 @@ import imageio
 import numpy as np
 
 
-def _pad_to_block(frame: np.ndarray, block: int = 16) -> np.ndarray:
-    """
-    Pad a frame so H and W are divisible by block (macroblock-friendly for ffmpeg).
-    Uses edge padding to avoid introducing new colors.
-    """
-    if frame.ndim < 2:
-        return frame
-    h, w = frame.shape[:2]
-    pad_h = (block - h % block) % block
-    pad_w = (block - w % block) % block
-    if pad_h == 0 and pad_w == 0:
-        return frame
-    pad_spec = ((0, pad_h), (0, pad_w))
-    if frame.ndim == 3:
-        pad_spec += ((0, 0),)
-    return np.pad(frame, pad_spec, mode="edge")
-
-
 def _ensure_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -40,8 +22,8 @@ def save_mp4(frames: Iterable[np.ndarray], path: str | Path, fps: int = 30) -> d
     start = time.time()
     path = Path(path)
     _ensure_dir(path)
-    frames_list = [_pad_to_block(f) for f in frames]
-    imageio.mimsave(path, frames_list, fps=fps, codec="libx264")
+    frames_list = list(frames)
+    imageio.mimsave(path, frames_list, fps=fps, codec="libx264", macro_block_size=1)
     duration = time.time() - start
     return {
         "path": str(path),
@@ -57,7 +39,7 @@ def save_gif(frames: Iterable[np.ndarray], path: str | Path, fps: int = 15) -> d
     start = time.time()
     path = Path(path)
     _ensure_dir(path)
-    frames_list = [_pad_to_block(f, block=16) for f in frames]
+    frames_list = list(frames)
     imageio.mimsave(path, frames_list, fps=fps)
     duration = time.time() - start
     return {
