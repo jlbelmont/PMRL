@@ -262,13 +262,41 @@ def obs_to_dict(obs) -> Dict[str, np.ndarray]:
 
 
 def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
-    stacked = []
+    """
+    Convert per-env deques of frames into a channel-first batch tensor.
+    - Accepts channel-first or channel-last frames.
+    - Pads tiny frames to at least 8x8 to avoid conv kernel issues.
+    - Merges time into channels: (T, C, H, W) -> (T*C, H, W).
+    """
+    stacked: List[np.ndarray] = []
     for frames in frame_stacks:
-        # frames already (H, W, 1); stack -> (T, H, W)
-        arr = np.stack(list(frames), axis=0)
-        if arr.ndim == 4:
-            arr = arr[..., 0]
+        arr = np.stack(list(frames), axis=0).astype(np.float32)
+        arr = np.squeeze(arr)
+        if arr.ndim == 2:  # (H, W)
+            arr = arr[None, None, ...]
+        elif arr.ndim == 3:  # (T, H, W) or (H, W, C)
+            if arr.shape[-1] in (1, 3) and arr.shape[0] != 1:
+                arr = np.transpose(arr, (0, 3, 1, 2))  # (T, C, H, W)
+            else:
+                arr = arr[:, None, ...]  # (T, 1, H, W)
+        elif arr.ndim == 4:
+            if arr.shape[-1] in (1, 3) and arr.shape[1] not in (1, 3):
+                arr = np.transpose(arr, (0, 3, 1, 2))
+        else:
+            raise ValueError(f"Unexpected frame shape {arr.shape}")
+
+        # Pad spatially if needed
+        _, _, h, w = arr.shape
+        if h < 8 or w < 8:
+            rep_h = (8 + h - 1) // h
+            rep_w = (8 + w - 1) // w
+            arr = np.repeat(np.repeat(arr, rep_h, axis=2), rep_w, axis=3)
+
+        # Merge time into channels
+        t, c, h, w = arr.shape
+        arr = arr.reshape(t * c, h, w)
         stacked.append(arr)
+
     return np.stack(stacked, axis=0)
 
 

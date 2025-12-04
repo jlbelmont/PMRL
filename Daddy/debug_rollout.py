@@ -66,13 +66,65 @@ def make_env(env_cfg: Dict, seed: int) -> SafeRedEnv:
 
 
 def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
-    stacked = []
+    """
+    Convert a list of frame deques into (B, C, H, W) ready for the network.
+    Mirrors the stack_frames used in train_big/train_slim:
+      * squeezes stray singleton dims that appear from wrappers,
+      * normalizes to channel-first,
+      * guarantees at least 8x8 spatial size by repeat/pad,
+      * merges time into channels.
+    """
+    batches: List[np.ndarray] = []
     for frames in frame_stacks:
-        arr = np.stack(list(frames), axis=0)
-        if arr.ndim == 4:
-            arr = arr[..., 0]
-        stacked.append(arr)
-    return np.stack(stacked, axis=0)
+        arr = np.stack(list(frames), axis=0)  # (T, ...)
+
+        # Squeeze extra singleton dims (sometimes (T,1,H,W,1), etc.)
+        while arr.ndim > 4 and (arr.shape[1] == 1 or arr.shape[-1] == 1):
+            if arr.shape[1] == 1:
+                arr = np.squeeze(arr, axis=1)
+            elif arr.shape[-1] == 1:
+                arr = np.squeeze(arr, axis=-1)
+            else:
+                break
+
+        # Normalize to channel-first (T, C, H, W)
+        if arr.ndim == 4 and arr.shape[-1] in (1, 3):
+            arr = np.transpose(arr, (0, 3, 1, 2))
+        elif arr.ndim == 3:  # (T, H, W)
+            arr = arr[:, None, ...]
+        elif arr.ndim == 2:  # (H, W)
+            arr = arr[None, None, ...]
+
+        if arr.ndim != 4:
+            raise ValueError(f"Unexpected frame shape {arr.shape}")
+
+        _, _, h, w = arr.shape
+
+        # Repeat to reach minimum spatial size for conv kernels
+        rep_h = (8 + h - 1) // h
+        rep_w = (8 + w - 1) // w
+        if rep_h > 1 or rep_w > 1:
+            arr = np.repeat(np.repeat(arr, rep_h, axis=2), rep_w, axis=3)
+            h, w = arr.shape[2], arr.shape[3]
+
+        # Pad if still undersized
+        pad_h = max(0, 8 - h)
+        pad_w = max(0, 8 - w)
+        if pad_h or pad_w:
+            arr = np.pad(arr, ((0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+
+        # Merge time into channels
+        t, c, h, w = arr.shape
+        merged = arr.reshape(t * c, h, w).astype(np.float32)
+        # Final safety: ensure spatial dims still meet conv expectations
+        mh, mw = merged.shape[1], merged.shape[2]
+        pad_h = max(0, 8 - mh)
+        pad_w = max(0, 8 - mw)
+        if pad_h or pad_w:
+            merged = np.pad(merged, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+        batches.append(merged)
+
+    return np.stack(batches, axis=0)
 
 
 def to_torch_batch(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[str, torch.Tensor]:
@@ -111,6 +163,11 @@ def main() -> None:
 
     for step in range(args.steps):
         frame_batch = torch.as_tensor(stack_frames(frame_stacks), device=device)
+        # Final tensor-level safety to avoid tiny spatial dims slipping through
+        if frame_batch.shape[-2] < 8 or frame_batch.shape[-1] < 8:
+            pad_h = max(0, 8 - frame_batch.shape[-2])
+            pad_w = max(0, 8 - frame_batch.shape[-1])
+            frame_batch = torch.nn.functional.pad(frame_batch, (0, pad_w, 0, pad_h), mode="replicate")
         structured, milestone_flags = agent.flag_encoder(to_torch_batch(obs, device=device))
         done_mask = torch.as_tensor(dones, device=device, dtype=torch.float32)
         actions, new_states, aux = agent.act(frame_batch, structured, states, done_mask)
