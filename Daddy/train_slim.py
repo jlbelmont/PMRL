@@ -738,7 +738,12 @@ def main() -> None:
     # If no video was emitted (e.g., no episodes completed), emit one from buffered frames.
     if args.record_video_every and frames_for_video and not video_saved:
         Path(args.video_dir).mkdir(parents=True, exist_ok=True)
-        out_path = Path(args.video_dir) / "train_final.mp4"
+        base = Path(args.video_dir) / "train_final"
+        out_path = base.with_suffix(".mp4")
+        suffix = 1
+        while out_path.exists():
+            out_path = base.with_name(f"{base.stem}_{suffix}").with_suffix(".mp4")
+            suffix += 1
         artifacts = maybe_save_video(frames_for_video, "mp4", out_path, fps=15)
         for art in artifacts:
             print(f"[video] saved {art['path']} ({art['frames']} frames)")
