@@ -314,6 +314,7 @@ def main() -> None:
     device = torch.device(args.device)
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "config.json").write_text(json.dumps(vars(args), indent=2))
     
     # Setup checkpointing paths
     checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else log_dir / "checkpoints"
@@ -330,24 +331,54 @@ def main() -> None:
     env_cfg = load_env_config(headless=args.headless)
 
     # curriculum setup: prefer user-provided savestate directory for both loading and saving
-    save_state_dir = Path(args.save_state_dir).expanduser().resolve()
-    save_state_dir.mkdir(parents=True, exist_ok=True)
-    env_cfg["state_dir"] = str(save_state_dir)
-    init_state = env_cfg.get("init_state", "Bulbasaur")
-    init_state_file = save_state_dir / f"{init_state}.state"
-    if not init_state_file.exists():
-        existing_states = sorted(save_state_dir.glob("*.state"))
-        if existing_states:
-            env_cfg["init_state"] = existing_states[0].stem
-    initial_states = sorted(save_state_dir.glob("*.state"))
-    curriculum = CurriculumManager(savestates=initial_states)
+    save_state_root = Path(args.save_state_dir).expanduser().resolve()
+    save_state_root.mkdir(parents=True, exist_ok=True)
+    run_name = log_dir.name
+    curriculum = CurriculumManager(base_dir=save_state_root, run_name=run_name)
+
+    def _bootstrap_init_states() -> None:
+        if curriculum.list_states():
+            return
+        repo_root = Path(__file__).resolve().parents[1]
+        candidates = [
+            repo_root / "archive" / "pokemonred_puffer_assets" / "pyboy_states" / "Bulbasaur.state",
+            repo_root / "pokemonred_puffer" / "pyboy_states" / "Bulbasaur.state",
+        ]
+        for c in candidates:
+            if c.exists():
+                dest = curriculum.run_dir / c.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(c.read_bytes())
+                curriculum.register_state("pallet_start", dest, tier="early")
+                break
+
+    _bootstrap_init_states()
+    env_cfg["state_dir"] = str(curriculum.run_dir)
 
     def env_fn(idx: int):
         return make_env(env_cfg, seed=args.seed + idx)
 
     envs = SimpleVectorEnv([lambda idx=i: env_fn(idx) for i in range(args.num_envs)])
 
-    obs, _ = envs.reset(seed=args.seed)
+    current_state_tags: List[Optional[str]] = [None for _ in range(args.num_envs)]
+
+    def _sample_reset_options() -> list:
+        opts: list = []
+        for env_idx in range(args.num_envs):
+            sample = curriculum.sample_state()
+            if sample:
+                tag, path = sample
+                current_state_tags[env_idx] = tag
+                try:
+                    opts.append({"state": path.read_bytes()})
+                    continue
+                except Exception:
+                    pass
+            current_state_tags[env_idx] = None
+            opts.append(None)
+        return opts
+
+    obs, _ = envs.reset(seed=args.seed, options=_sample_reset_options())
     obs = obs_to_dict(obs)
     num_actions = envs.single_action_space.n
 
@@ -428,6 +459,8 @@ def main() -> None:
     # video buffer (only env 0 to limit size)
     frames_for_video: List[np.ndarray] = []
     video_saved = False
+    last_badge = np.zeros(args.num_envs, dtype=np.int32)
+    last_map = np.zeros(args.num_envs, dtype=np.int32)
 
     # Streaming setup (for viewing best agents on laptop)
     stream_client: Optional[StreamClient] = None
@@ -519,6 +552,7 @@ def main() -> None:
         for env_idx, done in enumerate(done_flags):
             if done:
                 perf.episode()
+                curriculum.record_outcome(current_state_tags[env_idx], float(episode_total[env_idx]))
                 bayes_updates[env_idx] = agent.update_bayes_from_milestones(
                     milestone_flags[env_idx].detach().cpu()
                 )
@@ -542,17 +576,11 @@ def main() -> None:
                 episode_total[env_idx] = 0.0
                 episode_lengths[env_idx] = 0
                 agent.reset_episode(env_idx)
-                # select next init savestate if available
-                maybe_state = curriculum.sample_state()
-                env = envs.envs[env_idx]
-                if maybe_state and maybe_state.exists():
-                    env.init_state_name = maybe_state.stem
-                    env.init_state_path = Path(env.state_dir) / f"{env.init_state_name}.state"
                 # save new savestates if requested
                 if args.save_state_every and (episode_ids[env_idx] % args.save_state_every == 0):
-                    save_path = save_state_dir / f"ep{episode_ids[env_idx]:05d}_env{env_idx}.state"
-                    env._save_emulator_state(save_path)
-                    curriculum.add_state(save_path)
+                    save_path = curriculum.run_dir / f"ep{episode_ids[env_idx]:05d}_env{env_idx}.state"
+                    envs.envs[env_idx]._save_emulator_state(save_path)
+                    curriculum.register_state(f"ep{episode_ids[env_idx]:05d}", save_path, tier="mid")
                 # record video if requested (env 0 only)
                 if args.record_video_every and env_idx == 0 and episode_ids[env_idx] % args.record_video_every == 0:
                     Path(args.video_dir).mkdir(parents=True, exist_ok=True)
@@ -563,7 +591,18 @@ def main() -> None:
                             print(f"[video] saved {art['path']} ({art['frames']} frames)")
                             video_saved = True
                     frames_for_video.clear()
-                reset_obs, _ = envs.envs[env_idx].reset(seed=args.seed + env_idx)
+                sample = curriculum.sample_state()
+                reset_opts = None
+                if sample:
+                    tag, path = sample
+                    current_state_tags[env_idx] = tag
+                    try:
+                        reset_opts = {"state": path.read_bytes()}
+                    except Exception:
+                        reset_opts = None
+                else:
+                    current_state_tags[env_idx] = None
+                reset_obs, _ = envs.envs[env_idx].reset(seed=args.seed + env_idx, options=reset_opts)
                 reset_obs = obs_to_dict(reset_obs)
                 for key in next_obs:
                     next_obs[key][env_idx] = reset_obs[key]
@@ -586,6 +625,21 @@ def main() -> None:
                 if total > 0:
                     p = hist / total
                     entropy = float(-(p * np.log(p + 1e-8)).sum())
+            # milestone-triggered savestate on new badge/map
+            map_id = stats.get("map_id", None) if isinstance(stats, dict) else None
+            badge = stats.get("badge", None) if isinstance(stats, dict) else None
+            if badge is not None and badge != last_badge[env_idx]:
+                tag = f"badge_{int(badge)}"
+                path = curriculum.maybe_save_milestone(envs.envs[env_idx], tag, step)
+                if path:
+                    current_state_tags[env_idx] = tag
+                last_badge[env_idx] = int(badge)
+            if map_id is not None and map_id != last_map[env_idx]:
+                tag = f"map_{int(map_id):03d}"
+                path = curriculum.maybe_save_milestone(envs.envs[env_idx], tag, step)
+                if path:
+                    current_state_tags[env_idx] = tag
+                last_map[env_idx] = int(map_id)
             pos_writer.writerow(
                 {
                     "step_global": step,
@@ -666,9 +720,9 @@ def main() -> None:
                     # optional: save savestate on Bayes update
                     if args.save_state_on_bayes:
                         env = envs.envs[env_idx]
-                        save_path = save_state_dir / f"bayes_ep{episode_ids[env_idx]:05d}_env{env_idx}_{name}.state"
+                        save_path = curriculum.run_dir / f"bayes_ep{episode_ids[env_idx]:05d}_env{env_idx}_{name}.state"
                         env._save_emulator_state(save_path)
-                        curriculum.add_state(save_path)
+                        curriculum.register_state(f"bayes_{name}", save_path, tier="mid")
 
             # collect frames for optional video (env 0 only)
             if args.record_video_every and env_idx == 0:

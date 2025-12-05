@@ -83,10 +83,15 @@ class SimpleVectorEnv:
         self.envs = [fn() for fn in env_fns]
         self.single_action_space = self.envs[0].action_space
 
-    def reset(self, seed: Optional[int] = None):
+    def reset(self, seed: Optional[int] = None, options: Optional[list | dict] = None):
         obs_list, infos = [], []
         for idx, env in enumerate(self.envs):
-            o, info = env.reset(seed=None if seed is None else seed + idx)
+            opt = None
+            if isinstance(options, list):
+                opt = options[idx] if idx < len(options) else None
+            elif isinstance(options, dict):
+                opt = options
+            o, info = env.reset(seed=None if seed is None else seed + idx, options=opt)
             obs_list.append(o)
             infos.append(info)
         return stack_obs_list(obs_list), infos
