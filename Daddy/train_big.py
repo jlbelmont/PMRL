@@ -339,6 +339,7 @@ def main() -> None:
     last_checkpoint = start_time
     video_every = args.video_interval if args.video_interval else args.record_video_every
     frames_for_video: List[np.ndarray] = []
+    video_saved = False
 
     for step in range(args.total_steps):
         frame_batch = torch.as_tensor(stack_frames(frame_stacks), device=device)
@@ -505,6 +506,7 @@ def main() -> None:
                         artifacts = maybe_save_video(frames_for_video, "mp4", out_path, fps=15)
                         for art in artifacts:
                             logging.info("[video] saved %s (%d frames)", art["path"], art["frames"])
+                            video_saved = True
                     frames_for_video.clear()
                 elif env_idx == 0:
                     frames_for_video.clear()
@@ -568,7 +570,20 @@ def main() -> None:
 
         if args.save_interval and (step + 1) % args.save_interval == 0:
             ckpt_path = log_dir / f"checkpoint_step{step+1}.pth"
-            torch.save(agent.state_dict(), ckpt_path)
+            torch.save(
+                {
+                    "network_state_dict": agent.network.state_dict(),
+                    "target_network_state_dict": agent.target_network.state_dict(),
+                    "optimizer_state_dict": agent.optimizer.state_dict(),
+                    "rnd_state_dict": agent.rnd.state_dict(),
+                    "rnd_opt_state_dict": agent.rnd_opt.state_dict(),
+                    "epsilon": agent.epsilon,
+                    "global_step": agent.global_step,
+                    "episode_ids": episode_ids.tolist(),
+                    "step": step + 1,
+                },
+                ckpt_path,
+            )
             logging.info("[ckpt] saved %s", ckpt_path)
 
         if args.prune_interval and (step + 1) % args.prune_interval == 0:
@@ -576,6 +591,19 @@ def main() -> None:
             curriculum.promote_or_demote()
             after = curriculum.summary()
             logging.info("[prune] %s -> %s", before, after)
+
+    # final fallback video if nothing saved
+    if video_every and frames_for_video and not video_saved:
+        Path(args.video_dir).mkdir(parents=True, exist_ok=True)
+        base = Path(args.video_dir) / f"{args.run_name}_final"
+        out_path = base.with_suffix(".mp4")
+        suffix = 1
+        while out_path.exists():
+            out_path = base.with_name(f"{base.stem}_{suffix}").with_suffix(".mp4")
+            suffix += 1
+        artifacts = maybe_save_video(frames_for_video, "mp4", out_path, fps=15)
+        for art in artifacts:
+            logging.info("[video] saved %s (%d frames)", art["path"], art["frames"])
 
     # flush logs
     reward_logger.flush_steps()

@@ -12,7 +12,10 @@ from typing import Iterable, List
 
 import imageio
 import numpy as np
-import math
+
+# Canonical Game Boy resolution
+GAME_WIDTH = 160
+GAME_HEIGHT = 144
 
 
 def _ensure_dir(path: Path) -> None:
@@ -21,18 +24,27 @@ def _ensure_dir(path: Path) -> None:
 
 def _to_game_size(frame: np.ndarray, target_hw: tuple[int, int] = (144, 160)) -> np.ndarray:
     """
-    Upscale frames with nearest-neighbor to match original Game Boy resolution (144x160).
-    Only scales up; keeps aspect ratio by using the max scale factor and crops if slightly over.
+    Ensure frames are saved at the native Game Boy resolution (160x144) without interpolation.
+    Pads/crops with edge values only if dimensions mismatch.
     """
-    if frame.ndim < 2:
-        return frame
-    target_h, target_w = target_hw
-    h, w = frame.shape[:2]
+    target_h, target_w = GAME_HEIGHT, GAME_WIDTH
+    arr = np.asarray(frame)
+    if arr.ndim < 2:
+        return arr
+    h, w = arr.shape[:2]
+    # fast path
     if h == target_h and w == target_w:
-        return frame
-    scale = max(math.ceil(target_h / h), math.ceil(target_w / w), 1)
-    up = np.repeat(np.repeat(frame, scale, axis=0), scale, axis=1)
-    return up[:target_h, :target_w]  # crop if we overshoot
+        return arr
+    # pad or crop without interpolation
+    pad_h = max(0, target_h - h)
+    pad_w = max(0, target_w - w)
+    if pad_h or pad_w:
+        pad_spec = ((0, pad_h), (0, pad_w))
+        if arr.ndim == 3:
+            pad_spec += ((0, 0),)
+        arr = np.pad(arr, pad_spec, mode="edge")
+        h, w = arr.shape[:2]
+    return arr[:target_h, :target_w, ...] if arr.ndim == 3 else arr[:target_h, :target_w]
 
 
 def save_mp4(frames: Iterable[np.ndarray], path: str | Path, fps: int = 30) -> dict:

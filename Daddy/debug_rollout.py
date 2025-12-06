@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--video", choices=["none", "mp4", "gif", "both"], default="none")
     parser.add_argument("--video-dir", type=str, default="runs/videos")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint or raw state_dict for the policy.")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--headless", action="store_true", help="Run PyBoy headless")
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.set_defaults(headless=True)
@@ -80,6 +82,15 @@ def make_env(env_cfg: Dict, seed: int) -> SafeRedEnv:
     env = SafeRedEnv(cfg)
     env.reset(seed=seed)
     return env
+
+
+def _load_checkpoint_if_any(agent: SlimHierarchicalDQN, checkpoint: str, device: torch.device) -> None:
+    ckpt = torch.load(checkpoint, map_location=device)
+    state_dict = ckpt.get("network_state_dict", ckpt)
+    agent.network.load_state_dict(state_dict)
+    agent.target_network.load_state_dict(state_dict)
+    agent.epsilon = 0.0
+    print(f"[rollout] Loaded checkpoint from {checkpoint}")
 
 
 def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
@@ -151,7 +162,7 @@ def to_torch_batch(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[str
 
 def main() -> None:
     args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device)
     env_cfg = load_env_config(headless=args.headless)
 
     def env_fn(idx: int):
@@ -174,6 +185,8 @@ def main() -> None:
         replay_capacity=1,
     )
     agent = SlimHierarchicalDQN(agent_cfg, device=device)
+    if args.checkpoint:
+        _load_checkpoint_if_any(agent, args.checkpoint, device)
     agent.flag_encoder = flag_encoder
     states = agent.reset_hidden(args.num_envs)
     dones = np.zeros(args.num_envs, dtype=bool)

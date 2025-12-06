@@ -1,0 +1,44 @@
+{
+  "pallet_start": {
+    "tag": "pallet_start",
+    "path": "/Users/jbelmont/Downloads/College/MS/DRL/Stimulants_Not_Included/PMR_P_RL_Belmont/savestates/big_run_03/Bulbasaur.state",
+    "tier": "early",
+    "score": 0.0,
+    "uses": 2
+  },
+  "map_002": {
+    "tag": "map_002",
+    "path": "/Users/jbelmont/Downloads/College/MS/DRL/Stimulants_Not_Included/PMR_P_RL_Belmont/savestates/big_run_03/map_002_0002001.state",
+    "tier": "early",
+    "score": 0.0,
+    "uses": 0
+  },
+  "map_003": {
+    "tag": "map_003",
+    "path": "/Users/jbelmont/Downloads/College/MS/DRL/Stimulants_Not_Included/PMR_P_RL_Belmont/savestates/big_run_03/map_003_0004001.state",
+    "tier": "early",
+    "score": 0.0,
+    "uses": 0
+  },
+  "map_004": {
+    "tag": "map_004",
+    "path": "/Users/jbelmont/Downloads/College/MS/DRL/Stimulants_Not_Included/PMR_P_RL_Belmont/savestates/big_run_03/map_004_0016001.state",
+    "tier": "early",
+    "score": 0.0,
+    "uses": 0
+  },
+  "map_005": {
+    "tag": "map_005",
+    "path": "/Users/jbelmont/Downloads/College/MS/DRL/Stimulants_Not_Included/PMR_P_RL_Belmont/savestates/big_run_03/map_005_0035817.state",
+    "tier": "early",
+    "score": 0.0,
+    "uses": 0
+  },
+  "map_006": {
+    "tag": "map_006",
+    "path": "/Users/jbelmont/Downloads/College/MS/DRL/Stimulants_Not_Included/PMR_P_RL_Belmont/savestates/big_run_03/map_006_0041633.state",
+    "tier": "early",
+    "score": 0.0,
+    "uses": 0
+  }
+}
