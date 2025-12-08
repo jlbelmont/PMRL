@@ -23,6 +23,11 @@ import torch
 from omegaconf import OmegaConf
 
 from .agent import AgentConfig, SlimHierarchicalDQN
+from .video_utils import GAME_HEIGHT, GAME_WIDTH
+
+# Model input resolution (downsampled for training; videos remain native 160x144)
+MODEL_WIDTH = GAME_WIDTH // 2  # 80
+MODEL_HEIGHT = GAME_HEIGHT // 2  # 72
 from .env_utils import SafeRedEnv, SimpleVectorEnv
 from .flags import FlagEncoder
 from .logging_utils import PerformanceTracker, RewardLogger
@@ -84,8 +89,97 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-size", choices=list(MODEL_PRESETS.keys()), default="large")
     p.add_argument("--headless", action="store_true", help="Force headless emulator")
     p.add_argument("--no-headless", dest="headless", action="store_false")
+    p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint if available.")
     p.set_defaults(headless=True)
     return p.parse_args()
+
+
+def _list_checkpoints(run_dir: Path) -> list[Path]:
+    """Return checkpoints sorted by step descending."""
+    ckpt_dir = run_dir / "checkpoints"
+    candidates = list(ckpt_dir.glob("checkpoint_step*.pth"))
+    # also allow flat files directly under run_dir for backward compatibility
+    candidates += list(run_dir.glob("checkpoint_step*.pth"))
+    def _step_num(path: Path) -> int:
+        stem = path.stem  # checkpoint_stepXXXXXX
+        try:
+            return int(stem.split("checkpoint_step")[-1])
+        except Exception:
+            return -1
+    return sorted(candidates, key=_step_num, reverse=True)
+
+
+def _find_latest_checkpoint(run_dir: Path) -> Optional[Path]:
+    ckpts = _list_checkpoints(run_dir)
+    return ckpts[0] if ckpts else None
+
+
+def _load_checkpoint(agent, checkpoint_path: Path, device: torch.device) -> int:
+    # Torch 2.6+ defaults weights_only=True; allow full load for replay buffer/optimizer
+    try:
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        ckpt = torch.load(checkpoint_path, map_location=device)
+    # Build recurrent cells once so keys match
+    with torch.no_grad():
+        dummy_frames = torch.zeros(
+            1,
+            agent.config.frame_stack,
+            MODEL_HEIGHT,
+            MODEL_WIDTH,
+            device=device,
+        )
+        dummy_structured = None
+        if agent.config.structured_dim > 0:
+            dummy_structured = torch.zeros(1, agent.config.structured_dim, device=device)
+        _ = agent.network(
+            dummy_frames,
+            structured=dummy_structured,
+            state=agent.network.initial_state(batch_size=1, device=device),
+            done=None,
+        )
+        # also prime the target network so its GRU/LSTM exist before loading
+        _ = agent.target_network(
+            dummy_frames,
+            structured=dummy_structured,
+            state=agent.target_network.initial_state(batch_size=1, device=device),
+            done=None,
+        )
+    def _filtered_load(module, saved_state):
+        curr = module.state_dict()
+        filtered = {}
+        skipped = []
+        for k, v in saved_state.items():
+            if k in curr and curr[k].shape == v.shape:
+                filtered[k] = v
+            else:
+                skipped.append(k)
+        if skipped:
+            logging.warning("[resume] Skipped %d keys with shape mismatch: %s", len(skipped), skipped[:4])
+        module.load_state_dict(filtered, strict=False)
+
+    # sanity-check GRU/LSTM input sizes; if mismatched, skip resume entirely
+    ckpt_gru = ckpt.get("network_state_dict", {}).get("gru.weight_ih", None)
+    curr_gru = agent.network.gru.weight_ih if agent.network.gru is not None else None  # type: ignore[attr-defined]
+    if ckpt_gru is not None and curr_gru is not None and ckpt_gru.shape[1] != curr_gru.shape[1]:
+        logging.warning(
+            "[resume] GRU input mismatch (ckpt %s vs current %s). Skipping checkpoint restore.",
+            ckpt_gru.shape, curr_gru.shape,
+        )
+        return 0
+
+    _filtered_load(agent.network, ckpt["network_state_dict"])
+    _filtered_load(agent.target_network, ckpt["target_network_state_dict"])
+    agent.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    agent.rnd.load_state_dict(ckpt["rnd_state_dict"])
+    agent.rnd_opt.load_state_dict(ckpt["rnd_opt_state_dict"])
+    agent.epsilon = ckpt.get("epsilon", agent.epsilon)
+    agent.global_step = ckpt.get("global_step", 0)
+    # restore replay buffer if present
+    if "replay_buffer" in ckpt:
+        agent.replay.buffer = ckpt["replay_buffer"].get("buffer", [])
+        agent.replay.pos = ckpt["replay_buffer"].get("pos", 0)
+    return ckpt.get("step", 0)
 
 
 def setup_logging() -> None:
@@ -179,6 +273,23 @@ def stack_frames(frame_stacks: List[Deque[np.ndarray]]) -> np.ndarray:
             raise ValueError(f"Unexpected frame shape {arr.shape}")
 
         _, _, h, w = arr.shape
+        # Downsample/crop to match training resolution used by checkpoints (72x80).
+        target_h, target_w = MODEL_HEIGHT, MODEL_WIDTH
+        if h != target_h or w != target_w:
+            # stride down by the largest integer factor that keeps us >= target
+            stride_h = max(1, h // target_h)
+            stride_w = max(1, w // target_w)
+            arr = arr[:, :, ::stride_h, ::stride_w]
+            h, w = arr.shape[2], arr.shape[3]
+            # crop if still larger than target
+            arr = arr[:, :, :target_h, :target_w]
+            h, w = arr.shape[2], arr.shape[3]
+            # pad if still short
+            pad_h = max(0, target_h - h)
+            pad_w = max(0, target_w - w)
+            if pad_h or pad_w:
+                arr = np.pad(arr, ((0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+                h, w = arr.shape[2], arr.shape[3]
 
         # Repeat to reach minimum spatial size for conv kernels
         min_hw = 36
@@ -218,6 +329,8 @@ def main() -> None:
     log_dir = Path(args.log_dir) / args.run_name
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "config.json").write_text(json.dumps(vars(args), indent=2))
+    ckpt_dir = log_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     reward_logger = RewardLogger(log_dir=log_dir)
     perf = PerformanceTracker()
 
@@ -310,6 +423,22 @@ def main() -> None:
     )
     agent.flag_encoder = flag_encoder
     agent.epsilon_decay = (1.0 - agent.epsilon_min) / max(1, args.total_steps)
+    start_step = 0
+    if args.resume:
+        loaded = False
+        for ckpt_path in _list_checkpoints(log_dir):
+            try:
+                start_step = _load_checkpoint(agent, ckpt_path, device)
+                logging.info("[resume] Loaded %s at step %d", ckpt_path, start_step)
+                loaded = True
+                break
+            except Exception as e:
+                logging.warning("[resume] Failed to load %s (%s)", ckpt_path, e)
+                continue
+        if not loaded:
+            logging.warning("[resume] No checkpoint could be loaded in %s", log_dir / "checkpoints")
+    else:
+        agent.global_step = 0
 
     states = agent.reset_hidden(args.num_envs)
     dones = np.zeros(args.num_envs, dtype=bool)
@@ -341,7 +470,7 @@ def main() -> None:
     frames_for_video: List[np.ndarray] = []
     video_saved = False
 
-    for step in range(args.total_steps):
+    for step in range(start_step, args.total_steps):
         frame_batch = torch.as_tensor(stack_frames(frame_stacks), device=device)
         obs_tensors = {k: torch.as_tensor(v, device=device) for k, v in obs.items()}
         structured, milestone_flags = agent.flag_encoder(obs_tensors)
@@ -569,7 +698,7 @@ def main() -> None:
             logging.info("[eval] placeholder: eval_interval set but eval loop not implemented.")
 
         if args.save_interval and (step + 1) % args.save_interval == 0:
-            ckpt_path = log_dir / f"checkpoint_step{step+1}.pth"
+            ckpt_path = ckpt_dir / f"checkpoint_step{step+1}.pth"
             torch.save(
                 {
                     "network_state_dict": agent.network.state_dict(),
